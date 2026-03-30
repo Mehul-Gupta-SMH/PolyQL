@@ -190,6 +190,7 @@ Handoff: Claude marks task `[~]` and notes "ready for Codex" → Codex tests →
 
 | Date | Branch | File | Change |
 |------|--------|------|--------|
+| 2026-03-29 | `Claude/feature/benchmark-harness` | `benchmark/` | BM0–BM3: benchmark evaluation harness — `_bench_utils.py` (shared helpers), `ingest_bird.py`, `ingest_spider.py`, `run_inference.py`, `evaluate.py`; EX + VES metrics; per-difficulty/db breakdown; resume-safe JSONL output |
 | 2026-03-11 | `Claude/Playground/Dev` | `TASK.md` | Marked A2 complete and recorded the pytest run + Kuzu test coverage in the log. |
 | 2026-03-11 | `Claude/Playground/Dev` | `main.py` | P4: added `_preload_schemas_bulk()` — 2 SQLite queries upfront replace N×2 per-table queries in gather loop; `gatherRequirements` serves `get_schema` calls from cache |
 | 2026-03-11 | `Claude/Playground/Dev` | `pyproject.toml` | New: proper project metadata, runtime deps, optional `dev` + `graph-db` extras, pytest config, ruff config |

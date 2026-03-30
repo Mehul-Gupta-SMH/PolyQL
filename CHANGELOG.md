@@ -18,6 +18,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **SL3 — Glossary REST API** — `backend/glossary.py` (`APIRouter`): `POST /api/glossary/terms/single`, `POST /api/glossary/terms/bulk`, `GET /api/glossary/terms`, `GET /api/glossary/terms/{id}`, `PUT /api/glossary/terms/{id}`, `DELETE /api/glossary/terms/{id}`, `GET /api/glossary/search?q=`; registered in `backend/app.py`; CORS updated to allow `PUT`
 - **SL6 — Tests** — 35 CRUD unit tests (`tests/test_glossary_store.py`) and 19 semantic/injection tests (`tests/test_glossary_retrieval.py`); all 247 suite tests pass
 
+- **BM0–BM3 — Benchmark evaluation harness** — `benchmark/` module supports BIRD and Spider text-to-SQL benchmarks; `ingest_bird.py` / `ingest_spider.py` parse `tables.json` and populate Poly-QL metadata per instance; `run_inference.py` runs batch SQL generation (resume-safe JSONL, evidence injection for BIRD, per-question latency); `evaluate.py` computes EX (Execution Accuracy) and VES (Valid SQL rate) with breakdown by difficulty and db_id; summary CSV export
+
 ### Planned (Phase 2 — after QT1 accumulates real data)
 - **SL4** Glossary UI tab — searchable table, Add Term modal, bulk CSV/JSON import
 - **SL5** Term–table annotation nodes on the Schema/ERD tab
