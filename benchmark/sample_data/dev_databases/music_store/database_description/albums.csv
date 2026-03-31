@@ -1,0 +1,6 @@
+original_column_name,value_description
+album_id,Unique identifier for each album
+title,Album title
+artist_id,Foreign key to artists table
+year,Release year of the album
+genre,Music genre (Rock / Jazz / Pop / Electronic)

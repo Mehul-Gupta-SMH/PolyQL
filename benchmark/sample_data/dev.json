@@ -1,0 +1,66 @@
+[
+  {
+    "question_id": 1,
+    "db_id": "music_store",
+    "question": "How many artists are from the UK?",
+    "evidence": "UK refers to country = 'UK'",
+    "SQL": "SELECT COUNT(*) FROM artists WHERE country = 'UK'",
+    "difficulty": "simple"
+  },
+  {
+    "question_id": 2,
+    "db_id": "music_store",
+    "question": "List all album titles released after 2000, ordered by year.",
+    "evidence": "",
+    "SQL": "SELECT title FROM albums WHERE year > 2000 ORDER BY year",
+    "difficulty": "simple"
+  },
+  {
+    "question_id": 3,
+    "db_id": "music_store",
+    "question": "What is the total revenue from all sales?",
+    "evidence": "Total revenue is the sum of revenue_usd across all sales records",
+    "SQL": "SELECT SUM(revenue_usd) FROM sales",
+    "difficulty": "simple"
+  },
+  {
+    "question_id": 4,
+    "db_id": "music_store",
+    "question": "Which artist has the most albums?",
+    "evidence": "",
+    "SQL": "SELECT a.name FROM artists a JOIN albums al ON a.artist_id = al.artist_id GROUP BY a.artist_id ORDER BY COUNT(*) DESC LIMIT 1",
+    "difficulty": "moderate"
+  },
+  {
+    "question_id": 5,
+    "db_id": "music_store",
+    "question": "What are the top 3 best-selling tracks by total quantity sold?",
+    "evidence": "best-selling means highest total quantity",
+    "SQL": "SELECT t.title, SUM(s.quantity) as total_qty FROM tracks t JOIN sales s ON t.track_id = s.track_id GROUP BY t.track_id ORDER BY total_qty DESC LIMIT 3",
+    "difficulty": "moderate"
+  },
+  {
+    "question_id": 6,
+    "db_id": "music_store",
+    "question": "For each genre, what is the average track price?",
+    "evidence": "",
+    "SQL": "SELECT al.genre, AVG(t.price_usd) FROM tracks t JOIN albums al ON t.album_id = al.album_id GROUP BY al.genre",
+    "difficulty": "moderate"
+  },
+  {
+    "question_id": 7,
+    "db_id": "music_store",
+    "question": "Which month in 2023 had the highest total revenue?",
+    "evidence": "Use strftime to extract the month from sale_date",
+    "SQL": "SELECT strftime('%m', sale_date) as month, SUM(revenue_usd) as total FROM sales WHERE sale_date LIKE '2023%' GROUP BY month ORDER BY total DESC LIMIT 1",
+    "difficulty": "challenging"
+  },
+  {
+    "question_id": 8,
+    "db_id": "music_store",
+    "question": "List artists who have tracks with a duration over 5 minutes (300 seconds).",
+    "evidence": "5 minutes = 300 seconds",
+    "SQL": "SELECT DISTINCT ar.name FROM artists ar JOIN albums al ON ar.artist_id = al.artist_id JOIN tracks t ON al.album_id = t.album_id WHERE t.duration_sec > 300",
+    "difficulty": "moderate"
+  }
+]

@@ -1,0 +1,6 @@
+original_column_name,value_description
+sale_id,Unique identifier for each sale record
+track_id,Foreign key to tracks table
+sale_date,Date of sale (YYYY-MM-DD)
+quantity,Number of units sold
+revenue_usd,Total revenue in US dollars

@@ -1,0 +1,6 @@
+benchmark,results_file,scope,key,n,ex_pct,ves_pct
+bird,sample_claude_code.jsonl,overall,all,8,50.0,100.0
+bird,sample_claude_code.jsonl,difficulty,challenging,1,100.0,100.0
+bird,sample_claude_code.jsonl,difficulty,moderate,4,25.0,100.0
+bird,sample_claude_code.jsonl,difficulty,simple,3,66.67,100.0
+bird,sample_claude_code.jsonl,db,music_store,8,50.0,100.0

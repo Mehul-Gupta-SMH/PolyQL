@@ -1,0 +1,6 @@
+original_column_name,value_description
+track_id,Unique identifier for each track
+album_id,Foreign key to albums table
+title,Track title
+duration_sec,Duration in seconds
+price_usd,Track price in US dollars

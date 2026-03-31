@@ -1,0 +1,4 @@
+original_column_name,value_description
+artist_id,Unique identifier for each artist
+name,Full name of the artist or band
+country,Country of origin (2-letter code)

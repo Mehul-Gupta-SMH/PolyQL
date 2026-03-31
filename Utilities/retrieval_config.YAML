@@ -14,7 +14,7 @@ indexing:
 scoring:
   crossencoder: 'mixedbread-ai/mxbai-rerank-base-v1'
   bias_detection: "d4data/bias-detection-model"
-  reranker_threshold: 0.0      # cross-encoder logit cutoff; scores above this are kept
+  reranker_threshold: -5.0     # FlagReranker outputs raw logits (negative range); -5.0 separates relevant (~-3) from irrelevant (~-6+)
   column_score_threshold: 0.0  # BM25 cutoff for column relevance; key columns always kept
 
 
