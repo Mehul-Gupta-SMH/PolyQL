@@ -56,16 +56,21 @@ def _load_table_descriptions(desc_dir: Path) -> dict[str, dict[str, str]]:
     for csv_path in desc_dir.glob("*.csv"):
         table_key = csv_path.stem.lower()
         col_descs: dict[str, str] = {}
-        try:
-            with csv_path.open(encoding="utf-8-sig", newline="") as fh:
-                reader = csv.DictReader(fh)
-                for row in reader:
-                    col = (row.get("original_column_name") or row.get("col_name") or "").strip().lower()
-                    desc = (row.get("value_description") or row.get("description") or "").strip()
-                    if col:
-                        col_descs[col] = desc
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not read %s: %s", csv_path, exc)
+        for encoding in ("utf-8-sig", "latin-1"):
+            try:
+                with csv_path.open(encoding=encoding, newline="") as fh:
+                    reader = csv.DictReader(fh)
+                    for row in reader:
+                        col = (row.get("original_column_name") or row.get("col_name") or "").strip().lower()
+                        desc = (row.get("column_description") or row.get("value_description") or row.get("description") or "").strip()
+                        if col:
+                            col_descs[col] = desc
+                break  # success — no need to retry with next encoding
+            except UnicodeDecodeError:
+                col_descs = {}  # reset and retry
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not read %s: %s", csv_path, exc)
+                break
         result[table_key] = col_descs
     return result
 
@@ -88,7 +93,14 @@ def _parse_db_schema(db_entry: dict, desc_map: dict[str, dict[str, str]]) -> lis
     column_names = db_entry.get("column_names_original", [])
     column_types = db_entry.get("column_types", [])
     table_names  = db_entry.get("table_names_original", [])
-    primary_keys = set(db_entry.get("primary_keys", []))
+    # primary_keys may contain plain ints OR nested lists (composite PKs)
+    raw_pks = db_entry.get("primary_keys", [])
+    primary_keys: set[int] = set()
+    for pk in raw_pks:
+        if isinstance(pk, list):
+            primary_keys.update(pk)
+        else:
+            primary_keys.add(pk)
     foreign_keys = db_entry.get("foreign_keys", [])
 
     # Group columns by table index

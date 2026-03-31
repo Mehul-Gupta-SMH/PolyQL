@@ -58,7 +58,9 @@ Ask *"Which customers placed the most orders last quarter?"* and get a ready-to-
 | **Join Path explorer** | Select any two tables and instantly see the shortest JOIN route, with join keys and cardinality annotations |
 | **Derivative Tables** | See which tables were built from a source table via pipeline SQL, and which tables a derived table originates from |
 | **Qualified table names** | Full `database.schema.table` notation supported in pipeline ingestion — qualifiers are preserved through parsing and stored correctly |
+| **Business Semantic Layer** | Define business terms (KPIs, formulas, synonyms) in a glossary; terms are embedded and injected into the LLM prompt when semantically relevant — ensures canonical definitions are always used |
 | **Execution outcome tracking** | Every query run via the UI records a success / empty / failure verdict with latency and error details — powers the future validation layer |
+| **Benchmark evaluation** | BIRD and Spider text-to-SQL benchmark harness — ingest, run batch inference, compute EX and VES metrics per difficulty and per DB |
 | **Observability** | JSON-structured request logs and a `GET /metrics` Prometheus endpoint for request latencies, error rates, and LLM call counts per provider |
 | **User accounts** | Login / register with username + password, or **Sign in with Google** |
 | **Session history** | Conversations are saved per user and accessible across sessions |
@@ -207,6 +209,28 @@ The **Sign in with Google** button appears on the login page automatically when 
 
 ---
 
+## Business Semantic Layer
+
+Add business definitions that get automatically injected into the LLM context when relevant:
+
+```bash
+# Add a term via REST API
+curl -X POST http://localhost:8000/api/glossary/terms/single \
+  -H "Content-Type: application/json" \
+  -d '{
+    "term_name": "ARR",
+    "full_name": "Annual Recurring Revenue",
+    "definition": "Sum of all recurring subscription revenue normalised to a 12-month period.",
+    "formula": "SUM(monthly_revenue * 12) WHERE subscription_type = '\''recurring'\''",
+    "table_deps": ["subscriptions", "invoices"],
+    "example_value": "4200000"
+  }'
+```
+
+Terms are embedded into ChromaDB. When a user asks about "ARR" or "recurring revenue", the matching terms are prepended to the schema section so the LLM uses the canonical formula.
+
+---
+
 ## Schema Format
 
 One JSON file per table:
@@ -244,6 +268,51 @@ One JSON file per table:
 
 ---
 
+## Benchmark Evaluation
+
+Run Poly-QL against the BIRD or Spider text-to-SQL benchmarks to measure accuracy.
+
+### BIRD mini-dev (500 questions)
+
+```bash
+# 1. Ingest all 11 BIRD databases into PolyQL metadata
+python -m benchmark.ingest_bird \
+    --data_dir benchmark/bird_data/minidev/MINIDEV \
+    --instance_prefix bird
+
+# 2. Run batch inference
+python -m benchmark.run_inference \
+    --benchmark bird \
+    --data_dir benchmark/bird_data/minidev/MINIDEV \
+    --provider claude_code \
+    --output_file results/bird_mini.jsonl \
+    --instance_prefix bird \
+    --sleep 1
+
+# 3. Evaluate EX + VES
+python -m benchmark.evaluate \
+    --results_file results/bird_mini.jsonl \
+    --benchmark bird \
+    --data_dir benchmark/bird_data/minidev/MINIDEV \
+    --output_csv results/bird_mini_summary.csv
+```
+
+### Universal ingestion agent (any benchmark format)
+
+For benchmarks in formats other than BIRD/Spider, use the LLM-powered ingestion agent — it auto-detects the schema format (tables.json, SQL CREATE TABLE files, CSV metadata, custom JSON/YAML):
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+
+python -m benchmark.ingest_agent \
+    --data_dir /path/to/any/benchmark \
+    --instance_prefix mybench \
+    [--db_ids db1,db2] \
+    [--force]
+```
+
+---
+
 ## Configuration
 
 ### Provider balance & availability
@@ -267,7 +336,7 @@ gather_requirements:
 python -m pytest tests/ -v
 ```
 
-193 tests, no API keys or ML models required — all external dependencies are mocked in `tests/conftest.py`.
+247 tests, no API keys or ML models required — all external dependencies are mocked in `tests/conftest.py`.
 
 CI also runs a lint check before tests:
 
@@ -287,7 +356,8 @@ SQLCoder/
 │   ├── app.py                 # FastAPI application + all endpoints
 │   ├── auth.py                # JWT auth, user accounts, sessions (SQLite)
 │   ├── balance.py             # Provider credit/availability checker (GET /api/providers/balance)
-│   ├── ingestion.py           # Pipeline SQL parsing + LLM-assisted data dictionary generation
+│   ├── glossary.py            # Business Semantic Layer REST API (CRUD + search)
+│   ├── ingestion.py           # Pipeline SQL parsing + store_table (SQLite + ChromaDB + Kuzu)
 │   ├── logging_config.py      # JSON structured log formatter (configure_logging)
 │   └── metrics.py             # In-memory Prometheus counters (GET /metrics)
 ├── frontend/
@@ -298,19 +368,29 @@ SQLCoder/
 │       └── constants/         # providerLabels.js (provider & model catalog)
 ├── APIManager/
 │   ├── AllAPICaller.py        # Multi-provider HTTP + subprocess LLM client
-│   ├── PromptBuilder.py       # Prompt templates + schema formatter
+│   ├── PromptBuilder.py       # Prompt templates + schema formatter (injects Business Definitions)
 │   └── APIHeads/              # Per-provider JSON request templates
 ├── MetadataManager/
+│   ├── GlossaryStore.py       # Business term CRUD + ChromaDB embedding + semantic search
 │   └── MetadataStore/
 │       ├── relationdb/
-│       │   ├── kuzuDB.py      # Kuzu embedded graph DB (default) — auto-migrates Relations.pickle
-│       │   └── networkxDB.py  # Legacy NetworkX backend (still available via strgType="networkx")
+│       │   ├── kuzuDB.py      # Kuzu embedded graph DB — auto-migrates from Relations.pickle
+│       │   └── networkxDB.py  # Legacy NetworkX backend (still available)
 │       └── vdb/               # ChromaDB vector store abstraction
 ├── Utilities/                 # Config loader, SQLite CRUD, YAML configs
+├── benchmark/
+│   ├── _bench_utils.py        # Shared helpers: EX metric, JSONL I/O, instance management
+│   ├── ingest_bird.py         # BIRD benchmark ingestion (tables.json + CSV descriptions)
+│   ├── ingest_spider.py       # Spider benchmark ingestion
+│   ├── ingest_agent.py        # LLM-powered universal ingestion agent (any format)
+│   ├── run_inference.py       # Batch inference runner (resume-safe JSONL)
+│   ├── evaluate.py            # EX + VES evaluation with per-difficulty/db breakdown
+│   └── sample_data/           # 4-table music_store DB + 8 sample questions
 ├── validation/
-│   ├── outcome_store.py       # Records query execution outcomes (success/empty/failure) to JSONL + SQLite
+│   ├── outcome_store.py       # Records query execution outcomes to JSONL + SQLite
 │   └── corpus/                # Runtime store — gitignored
-└── tests/                     # pytest suite (193 tests)
+├── results/                   # Benchmark result files — gitignored
+└── tests/                     # pytest suite (247 tests)
 ```
 
 For architecture deep-dives and extension guides see **[DEVELOPER.md](DEVELOPER.md)**.

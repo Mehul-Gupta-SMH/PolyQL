@@ -51,7 +51,13 @@ def _parse_db_schema(db_entry: dict) -> list[dict]:
     column_names = db_entry.get("column_names_original", [])
     column_types = db_entry.get("column_types", [])
     table_names  = db_entry.get("table_names_original", [])
-    primary_keys = set(db_entry.get("primary_keys", []))
+    raw_pks = db_entry.get("primary_keys", [])
+    primary_keys: set[int] = set()
+    for pk in raw_pks:
+        if isinstance(pk, list):
+            primary_keys.update(pk)
+        else:
+            primary_keys.add(pk)
     foreign_keys = db_entry.get("foreign_keys", [])
 
     tables_cols: dict[int, list] = {i: [] for i in range(len(table_names))}

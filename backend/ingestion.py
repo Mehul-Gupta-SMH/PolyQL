@@ -317,7 +317,13 @@ def store_table(
         vdb_metadata,
     )
 
-    # 3. NetworkX -------------------------------------------------------------
+    # 3. Kuzu graph — always register the table as a node so JOIN path lookups
+    #    never raise NodeNotFound, even when the table has no declared FKs.
+    from MetadataManager.MetadataStore.relationdb import kuzuDB as _kuzuDB
+    _conn = _kuzuDB._get_conn(instance_name)
+    _kuzuDB._ensure_schema(_conn, instance_name)
+    _kuzuDB._merge_node(_conn, table_name.lower())
+
     if relationships:
         rel_mgr = Relations(instance_name=instance_name)
         edges = [
