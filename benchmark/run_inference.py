@@ -32,6 +32,7 @@ from benchmark._bench_utils import (
     append_jsonl,
     make_instance_name,
     read_jsonl,
+    write_jsonl,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -50,12 +51,12 @@ def _load_bird_questions(data_dir: Path, db_ids: set[str] | None = None) -> list
 
         [{question_id, db_id, question, evidence, gold_sql, difficulty}]
     """
-    for name in ("dev.json", "mini_dev.json"):
+    for name in ("dev.json", "mini_dev.json", "mini_dev_sqlite.json"):
         path = data_dir / name
         if path.exists():
             break
     else:
-        raise FileNotFoundError(f"dev.json / mini_dev.json not found in {data_dir}")
+        raise FileNotFoundError(f"dev.json / mini_dev.json / mini_dev_sqlite.json not found in {data_dir}")
 
     with path.open(encoding="utf-8") as fh:
         raw: list[dict] = json.load(fh)
@@ -177,11 +178,15 @@ def run_inference(
 
     logger.info("Loaded %d questions for %s.", len(questions), benchmark)
 
-    # Resume: collect already-done question_ids
+    # Resume: collect successfully-processed question_ids (skip errors so they retry)
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    done_ids: set[str] = {r["question_id"] for r in read_jsonl(output_file)}
-    if done_ids:
-        logger.info("Resuming — %d questions already processed.", len(done_ids))
+    all_prior = list(read_jsonl(output_file))
+    done_ids: set[str] = {r["question_id"] for r in all_prior if r.get("result_type") == "sql"}
+    if all_prior:
+        logger.info("Resuming — %d questions already processed (%d successful, %d errors will retry).",
+                    len(all_prior), len(done_ids), len(all_prior) - len(done_ids))
+        # Rewrite file keeping only successful rows
+        write_jsonl(output_file, [r for r in all_prior if r.get("result_type") == "sql"])
 
     processed = 0
     errors = 0

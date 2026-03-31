@@ -32,3 +32,11 @@ validation/corpus/outcomes.jsonl
 results/*.jsonl
 results/*.csv
 tableMetadata.db
+
+# Benchmark raw data — large SQLite/SQL/zip files, download separately
+benchmark/bird_data/
+benchmark/bird_mini_dev/
+benchmark/minidev.zip
+benchmark/**/*.sqlite
+benchmark/**/*.zip
+benchmark/**/*.sql
