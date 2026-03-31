@@ -1,0 +1,26 @@
+[
+  {
+    "db_id": "music_store",
+    "table_names_original": ["artists", "albums", "tracks", "sales"],
+    "column_names_original": [
+      [-1, "*"],
+      [0, "artist_id"], [0, "name"],    [0, "country"],
+      [1, "album_id"],  [1, "title"],   [1, "artist_id"], [1, "year"], [1, "genre"],
+      [2, "track_id"],  [2, "album_id"],[2, "title"],     [2, "duration_sec"], [2, "price_usd"],
+      [3, "sale_id"],   [3, "track_id"],[3, "sale_date"],  [3, "quantity"],     [3, "revenue_usd"]
+    ],
+    "column_types": [
+      "text",
+      "number","text","text",
+      "number","text","number","number","text",
+      "number","number","text","number","number",
+      "number","number","text","number","number"
+    ],
+    "primary_keys": [1, 4, 8, 13],
+    "foreign_keys": [
+      [6, 1],
+      [9, 4],
+      [14, 8]
+    ]
+  }
+]

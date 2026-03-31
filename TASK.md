@@ -190,6 +190,11 @@ Handoff: Claude marks task `[~]` and notes "ready for Codex" → Codex tests →
 
 | Date | Branch | File | Change |
 |------|--------|------|--------|
+| 2026-03-31 | `Claude/feature/benchmark-harness` | `SQLBuilderComponents.py` | Fix: change Relations strgType from "networkx" to "kuzu" so retrieval uses the correct backend |
+| 2026-03-31 | `Claude/feature/benchmark-harness` | `Utilities/retrieval_config.YAML` | Fix: reranker_threshold 0.0 → -5.0 (FlagReranker outputs negative logits; 0.0 silently dropped all results) |
+| 2026-03-31 | `Claude/feature/benchmark-harness` | `benchmark/sample_data/` | Sample BIRD-format benchmark: music_store SQLite + tables.json + 8 questions (simple/moderate/challenging) |
+| 2026-03-31 | `Claude/feature/benchmark-harness` | `benchmark/ingest_bird.py`, `ingest_spider.py` | Richer table descriptions with column details for better reranker scoring |
+| 2026-03-31 | `Claude/feature/benchmark-harness` | `benchmark/run_inference.py` | Fix conversation builder: evidence as assistant exchange, plain question as final user turn for clean RAG |
 | 2026-03-29 | `Claude/feature/benchmark-harness` | `benchmark/` | BM0–BM3: benchmark evaluation harness — `_bench_utils.py` (shared helpers), `ingest_bird.py`, `ingest_spider.py`, `run_inference.py`, `evaluate.py`; EX + VES metrics; per-difficulty/db breakdown; resume-safe JSONL output |
 | 2026-03-11 | `Claude/Playground/Dev` | `TASK.md` | Marked A2 complete and recorded the pytest run + Kuzu test coverage in the log. |
 | 2026-03-11 | `Claude/Playground/Dev` | `main.py` | P4: added `_preload_schemas_bulk()` — 2 SQLite queries upfront replace N×2 per-table queries in gather loop; `gatherRequirements` serves `get_schema` calls from cache |

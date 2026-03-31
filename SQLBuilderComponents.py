@@ -144,7 +144,7 @@ class SQLBuilderSupport:
             dict: A dictionary containing table relations and associated join keys.
         """
         # Initializing a Relations object for managing table relations
-        RelationsObj = ManageRelations.Relations(strgType="networkx", instance_name=self.instance_name)
+        RelationsObj = ManageRelations.Relations(strgType="kuzu", instance_name=self.instance_name)
 
         # Retrieving table relations and associated join keys
         self.join_keys = RelationsObj.getRelation(list(self.table_list["direct"].keys()))

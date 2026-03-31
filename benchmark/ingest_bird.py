@@ -136,10 +136,24 @@ def _parse_db_schema(db_entry: dict, desc_map: dict[str, dict[str, str]]) -> lis
     tables: list[dict] = []
     for tbl_idx, tbl_name in enumerate(table_names):
         cols = tables_cols.get(tbl_idx, [])
-        col_summary = ", ".join(c["name"] for c in cols[:8])
-        if len(cols) > 8:
-            col_summary += f", … (+{len(cols) - 8} more)"
-        tbl_desc = f"Table {tbl_name} with columns: {col_summary}."
+
+        # Build a rich description so the cross-encoder reranker can score it
+        col_parts = []
+        for c in cols[:12]:
+            part = c["name"]
+            if c.get("constraints"):
+                part += f" ({c['constraints'].lower()})"
+            if c.get("desc"):
+                part += f": {c['desc']}"
+            col_parts.append(part)
+        if len(cols) > 12:
+            col_parts.append(f"and {len(cols) - 12} more columns")
+
+        tbl_desc = (
+            f"The {tbl_name} table stores data about {tbl_name.replace('_', ' ')}. "
+            f"Columns: {', '.join(col_parts)}."
+        )
+
         tables.append({
             "name": tbl_name,
             "desc": tbl_desc,

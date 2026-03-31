@@ -27,3 +27,8 @@ backend/data/*.db-wal
 # Runtime outcome store artifacts
 validation/corpus/outcomes.db
 validation/corpus/outcomes.jsonl
+
+# Benchmark results (local only — gitignored)
+results/*.jsonl
+results/*.csv
+tableMetadata.db

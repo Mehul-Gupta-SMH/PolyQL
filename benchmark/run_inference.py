@@ -118,20 +118,22 @@ def _build_conversation(question: str, evidence: str) -> list[dict]:
     """
     Build a minimal conversation list for generateQuery().
 
-    When evidence is non-empty (BIRD) it is prepended as a system hint so the
-    model can use domain-specific knowledge encoded in the benchmark.
+    Evidence (BIRD) is passed as an earlier assistant exchange so it reaches
+    the LLM as context without polluting the ChromaDB RAG search query.
+    The final user turn is always the plain question — generateQuery() uses the
+    last user messages for vector search.
     """
     messages: list[dict] = []
     if evidence:
         messages.append({
             "role": "user",
-            "content": (
-                f"Domain knowledge / hint for this question:\n{evidence}\n\n"
-                f"Question: {question}"
-            ),
+            "content": f"Domain knowledge hint: {evidence}",
         })
-    else:
-        messages.append({"role": "user", "content": question})
+        messages.append({
+            "role": "assistant",
+            "content": "Understood. I will apply that domain knowledge when writing the SQL.",
+        })
+    messages.append({"role": "user", "content": question})
     return messages
 
 
