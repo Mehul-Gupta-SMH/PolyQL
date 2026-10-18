@@ -22,6 +22,7 @@ from backend.auth import get_current_user
 from backend.logging_config import configure_logging
 from backend.metrics import metrics
 from backend.glossary import router as glossary_router
+from backend.okf import router as okf_router
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="SQLCoder API", lifespan=lifespan)
 
 app.include_router(glossary_router)  # SL3: business glossary endpoints
+app.include_router(okf_router)       # OKF bundle import for table search
 
 app.add_middleware(
     CORSMiddleware,
