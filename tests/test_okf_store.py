@@ -227,29 +227,31 @@ def _rag():
     return rag
 
 
+def _concept(cid, tables, body="", distance=0.2, **extra):
+    return {"concept_id": cid, "title": cid.rsplit("/", 1)[-1], "type": "Metric",
+            "description": "", "body": body, "tables": tables, "distance": distance, **extra}
+
+
 class TestAddOKFTables:
     CFG = {"enabled": True, "top_k": 5, "max_distance": 0.4}
 
     def test_adds_okf_tables_after_vector_hits(self):
         obj = _support()
-        hits = [
-            {"table": "customers", "concept_id": "/c", "description": "", "distance": 0.1},
-            {"table": "orders", "concept_id": "/metrics/revenue", "description": "", "distance": 0.2},
-        ]
+        concepts = [_concept("/c", ["customers"], distance=0.1), _concept("/metrics/revenue", ["orders"])]
         with patch("SQLBuilderComponents.get_config_val", return_value=self.CFG), \
-             patch("MetadataManager.OKFStore.get_okf_tables", return_value=hits) as get_tables:
+             patch("MetadataManager.OKFStore.search_concepts", return_value=concepts) as search:
             obj.__addOKFTables__(_rag())
 
         assert list(obj.table_list["direct"]) == ["customers", "orders"]
         assert obj.table_list["direct"]["customers"]["description"] == "vector hit"
         assert obj.table_list["direct"]["orders"]["description"] == "Order facts"
-        assert get_tables.call_args.kwargs["top_k"] == 5
-        assert get_tables.call_args.kwargs["max_distance"] == 0.4
+        assert search.call_args.kwargs["top_k"] == 5
+        assert search.call_args.kwargs["max_distance"] == 0.4
 
     def test_known_tables_scoped_to_instance(self):
         obj = _support(instance_name="prod")
         with patch("SQLBuilderComponents.get_config_val", return_value=self.CFG), \
-             patch("MetadataManager.OKFStore.get_okf_tables", return_value=[]):
+             patch("MetadataManager.OKFStore.search_concepts", return_value=[]):
             obj.__addOKFTables__(_rag())
 
         assert obj.DBObj.get_data.call_args[0][1] == {"instance_name": "prod"}
@@ -259,11 +261,116 @@ class TestAddOKFTables:
         obj = _support()
         side = cfg if isinstance(cfg, Exception) else None
         with patch("SQLBuilderComponents.get_config_val", return_value=cfg, side_effect=side), \
-             patch("MetadataManager.OKFStore.get_okf_tables") as get_tables:
+             patch("MetadataManager.OKFStore.search_concepts") as search:
             obj.__addOKFTables__(_rag())
 
-        get_tables.assert_not_called()
+        search.assert_not_called()
         assert list(obj.table_list["direct"]) == ["customers"]
+        assert obj.okf_hits == []
+
+    def test_keeps_concepts_for_prompt_including_tableless_ones(self):
+        obj = _support()
+        concepts = [
+            _concept("/metrics/revenue", ["orders"], body="Net of returns."),
+            _concept("/playbooks/fiscal_year", [], body="Fiscal year starts in April."),
+        ]
+        with patch("SQLBuilderComponents.get_config_val", return_value=self.CFG), \
+             patch("MetadataManager.OKFStore.search_concepts", return_value=concepts):
+            obj.__addOKFTables__(_rag())
+
+        assert [h["concept_id"] for h in obj.okf_hits] == ["/metrics/revenue", "/playbooks/fiscal_year"]
+        assert obj.okf_hits[1]["body"] == "Fiscal year starts in April."
+
+    def test_prompt_bodies_are_truncated_on_word_boundary(self):
+        obj = _support()
+        concepts = [_concept("/n", [], body="alpha beta gamma delta epsilon")]
+        cfg = {**self.CFG, "prompt_chars": 14}
+        with patch("SQLBuilderComponents.get_config_val", return_value=cfg), \
+             patch("MetadataManager.OKFStore.search_concepts", return_value=concepts):
+            obj.__addOKFTables__(_rag())
+
+        assert obj.okf_hits[0]["body"] == "alpha beta …"
+        assert concepts[0]["body"] == "alpha beta gamma delta epsilon"  # caller's data untouched
+
+    def test_include_in_prompt_false_keeps_tables_but_no_notes(self):
+        obj = _support()
+        concepts = [_concept("/metrics/revenue", ["orders"], body="x")]
+        cfg = {**self.CFG, "include_in_prompt": False}
+        with patch("SQLBuilderComponents.get_config_val", return_value=cfg), \
+             patch("MetadataManager.OKFStore.search_concepts", return_value=concepts):
+            obj.__addOKFTables__(_rag())
+
+        assert "orders" in obj.table_list["direct"]
+        assert obj.okf_hits == []
+
+
+class TestSearchConcepts:
+    def test_returns_concepts_with_resolved_tables_and_body(self):
+        raw = {
+            "metadatas": [[
+                {"concept_id": "/playbooks/fy", "title": "Fiscal year", "type": "Playbook",
+                 "tables": "", "body": "Starts in April."},
+                {"concept_id": "/metrics/revenue", "title": "Revenue", "tables": "orders,missing",
+                 "body": "Net of returns."},
+            ]],
+            "distances": [[0.3, 0.1]],
+            "documents": [["doc fy", "doc revenue"]],
+        }
+        with patch("MetadataManager.MetadataStore.vdb.Chroma.getData", return_value=raw):
+            concepts = OKFStore.search_concepts("q", ["orders"], _model(), MagicMock())
+
+        assert [c["concept_id"] for c in concepts] == ["/metrics/revenue", "/playbooks/fy"]
+        assert concepts[0]["tables"] == ["orders"] and concepts[0]["body"] == "Net of returns."
+        assert concepts[1]["tables"] == []
+
+    def test_falls_back_to_document_for_older_imports(self):
+        raw = {"metadatas": [[{"concept_id": "/a", "tables": ""}]], "distances": [[0.1]],
+               "documents": [["Revenue\nMetric\nNet of returns."]]}
+        with patch("MetadataManager.MetadataStore.vdb.Chroma.getData", return_value=raw):
+            concepts = OKFStore.search_concepts("q", [], _model(), MagicMock())
+
+        assert concepts[0]["body"] == "Revenue\nMetric\nNet of returns."
+
+    def test_import_stores_body_excerpt(self, bundle):
+        with patch("MetadataManager.MetadataStore.vdb.Chroma.addData") as add_data:
+            OKFStore.import_bundle(str(bundle), _model(), MagicMock())
+
+        meta = {r["metadata"]["concept_id"]: r["metadata"] for r in add_data.call_args[0][1]}
+        assert meta["/metrics/revenue"]["body"].startswith("Sum of delivered orders.")
+
+
+class TestPromptKnowledgeNotes:
+    def _schema(self, **ctx):
+        from APIManager.PromptBuilder import PromptBuilder
+
+        context = {"user_query": "monthly revenue", "table_list": {"direct": {}, "intermediate": {}},
+                   "join_keys": [], **ctx}
+        return PromptBuilder.format_schema(context)
+
+    def test_renders_knowledge_notes_before_schema(self):
+        hit = _concept("/metrics/revenue", ["orders"], body="# Definition\nNet of returns.",
+                       description="Recognised revenue.")
+        hit.update(title="Revenue", type="Metric")
+        out = self._schema(okf_hits=[hit])
+
+        assert "## Knowledge Notes" in out
+        assert out.index("## Knowledge Notes") < out.index("## Database Schema")
+        assert "### Revenue (Metric)" in out
+        assert "> Recognised revenue." in out
+        assert "**Tables:** orders" in out
+        assert "**Definition**" in out and "\n# Definition" not in out
+        assert "Net of returns." in out
+
+    def test_omitted_without_hits(self):
+        assert "## Knowledge Notes" not in self._schema()
+        assert "## Knowledge Notes" not in self._schema(okf_hits=[])
+
+    def test_follows_business_definitions(self):
+        out = self._schema(
+            glossary_hits=[{"term_name": "AUM", "definition": "Assets under management."}],
+            okf_hits=[_concept("/n", [], body="note")],
+        )
+        assert out.index("## Business Definitions") < out.index("## Knowledge Notes")
 
 
 # ---------------------------------------------------------------------------

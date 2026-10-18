@@ -31,6 +31,17 @@ def _build_bm25(corpus_key: tuple) -> BM25Okapi:
 
 
 
+def _truncate(text: str, limit: int) -> str:
+    """Cut *text* to at most *limit* characters, on a word boundary, with an ellipsis."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(None, 1)[0] if " " in text[:limit] else text[:limit]
+    return cut.rstrip() + " …"
+
+
+
+
 class SQLBuilderSupport:
     """
     Class to support SQL query building by providing necessary components.
@@ -68,6 +79,7 @@ class SQLBuilderSupport:
         }
         self.join_keys = None
         self.table_metadata = {}
+        self.okf_hits = []
 
         self.vdb_config = get_config_val("retrieval_config", ["vectordb"],True)
         self.tmddb_config = get_config_val("retrieval_config", ["tableMDdb"],True)
@@ -140,13 +152,17 @@ class SQLBuilderSupport:
 
     def __addOKFTables__(self, RetrievalObj):
         """
-        Add tables referenced by OKF concepts relevant to the user's query.
+        Add tables referenced by OKF concepts relevant to the user's query, and
+        keep those concepts for the prompt (self.okf_hits).
 
         Reuses the embedding model and ChromaDB client already loaded for table
         retrieval. Only tables that exist in table metadata for this instance are
-        added, after the vector-search results. No-op when the `okf` config
-        section is missing or disabled, or when no bundle has been imported.
+        added, after the vector-search results. Concept bodies are cut to
+        `okf.prompt_chars`; with `okf.include_in_prompt: false` no concepts are
+        kept. No-op when the `okf` config section is missing or disabled, or
+        when no bundle has been imported.
         """
+        self.okf_hits = []
         try:
             okf_cfg = get_config_val("retrieval_config", ["okf"], True) or {}
         except Exception:
@@ -154,7 +170,7 @@ class SQLBuilderSupport:
         if not okf_cfg.get("enabled", False):
             return
 
-        from MetadataManager.OKFStore import get_okf_tables
+        from MetadataManager.OKFStore import search_concepts, tables_from_concepts
 
         inst_filter = {}
         if self.instance_name != "default":
@@ -166,7 +182,7 @@ class SQLBuilderSupport:
         if not known:
             return
 
-        hits = get_okf_tables(
+        concepts = search_concepts(
             self.user_query,
             list(known),
             RetrievalObj.embedding_model,
@@ -176,7 +192,7 @@ class SQLBuilderSupport:
             max_distance=float(okf_cfg.get("max_distance", 0.5)),
         )
 
-        for hit in hits:
+        for hit in tables_from_concepts(concepts):
             if hit["table"] in self.table_list["direct"]:
                 continue
             self.table_list["direct"][hit["table"]] = {
@@ -187,6 +203,12 @@ class SQLBuilderSupport:
                 "OKF: added table %r via concept %r (distance %.3f)",
                 hit["table"], hit["concept_id"], hit["distance"],
             )
+
+        if okf_cfg.get("include_in_prompt", True):
+            prompt_chars = int(okf_cfg.get("prompt_chars", 800))
+            self.okf_hits = [
+                {**c, "body": _truncate(c["body"], prompt_chars)} for c in concepts
+            ]
 
 
     def __getTableRelations__(self):
@@ -344,4 +366,5 @@ class SQLBuilderSupport:
             "user_query": self.user_query,
             "table_list": self.table_list,
             "join_keys": self.join_keys,
+            "okf_hits": getattr(self, "okf_hits", []),
         }
