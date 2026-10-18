@@ -105,6 +105,33 @@ def _upsert_edge(conn: kuzu.Connection, src: str, tgt: str, join_keys) -> None:
     )
 
 
+def _add_graph_edge(G: nx.DiGraph, src: str, tgt: str, join_keys) -> None:
+    """
+    Add an edge to *G* without losing alternative join conditions.
+
+    nx.DiGraph holds one edge per (src, tgt), but the same pair can be joined
+    in more than one way (e.g. orders.order_date_id / orders.ship_date_id
+    → dim_date). ``JoinKeys`` keeps the first condition for existing callers;
+    ``JoinKeysAlternatives`` is set only when there is more than one.
+    Empty join keys are dropped once a real condition is known.
+    """
+    join_keys = str(join_keys) if join_keys else ""
+    if not G.has_edge(src, tgt):
+        G.add_edge(src, tgt, JoinKeys=join_keys)
+        return
+
+    data = G[src][tgt]
+    options = list(data.get("JoinKeysAlternatives") or [data.get("JoinKeys", "")])
+    if join_keys in options:
+        return
+    options = [jk for jk in options + [join_keys] if jk] or [""]
+    data["JoinKeys"] = options[0]
+    if len(options) > 1:
+        data["JoinKeysAlternatives"] = options
+    else:
+        data.pop("JoinKeysAlternatives", None)
+
+
 def _migrate_from_pickle(instance_name: str, conn: kuzu.Connection) -> None:
     """
     Import all nodes/edges from a legacy Relations.pickle into Kuzu.
@@ -161,10 +188,11 @@ def getObj(instance_name: str = "default") -> nx.DiGraph:
     res = conn.execute(
         f"MATCH (a:{_NODE_TABLE})-[r:{_REL_TABLE}]->(b:{_NODE_TABLE})"
         f" RETURN a.name, r.JoinKeys, b.name"
+        f" ORDER BY a.name, b.name, r.JoinKeys"
     )
     while res.has_next():
         row = res.get_next()
-        G.add_edge(row[0], row[2], JoinKeys=row[1])
+        _add_graph_edge(G, row[0], row[2], row[1])
 
     return G
 
@@ -187,31 +215,41 @@ def addRelations(GObj: nx.DiGraph, edges: dict, instance_name: str = "default") 
         _upsert_edge(conn, src, tgt, join_keys)
         _upsert_edge(conn, tgt, src, join_keys)  # bidirectional
 
-        GObj.add_edge(src, tgt, JoinKeys=join_keys)
-        GObj.add_edge(tgt, src, JoinKeys=join_keys)
+        _add_graph_edge(GObj, src, tgt, join_keys)
+        _add_graph_edge(GObj, tgt, src, join_keys)
 
 
 def getRelations(GObj: nx.DiGraph, target_nodes: list) -> list:
     """
     Retrieve relations between *target_nodes* via shortest-path traversal.
     Operates on the in-memory *GObj* (already loaded from Kuzu by getObj).
+
+    Pairs with no connecting path (or unknown tables) are skipped; the
+    remaining pairs are still resolved. A hop with several alternative join
+    conditions yields one relation per alternative so all of them reach the
+    prompt.
     """
     relations = []
 
     for comb in combinations(target_nodes, 2):
-        if not nx.has_path(GObj, comb[0].lower(), comb[1].lower()):
-            break
+        src, tgt = comb[0].lower(), comb[1].lower()
+        if src not in GObj or tgt not in GObj or not nx.has_path(GObj, src, tgt):
+            continue
 
-        path = nx.shortest_path(GObj, source=comb[0].lower(), target=comb[1].lower())
+        path = nx.shortest_path(GObj, source=src, target=tgt)
 
         for i in range(len(path) - 1):
-            relations.append({
-                "source": path[i],
-                "target": path[i + 1],
-                "edge_attributes": GObj.get_edge_data(path[i], path[i + 1]),
-                "node1_attributes": GObj.nodes[path[i]],
-                "node2_attributes": GObj.nodes[path[i + 1]],
-            })
+            edge_data = GObj.get_edge_data(path[i], path[i + 1])
+            alternatives = (edge_data or {}).get("JoinKeysAlternatives") or [None]
+            for join_keys in alternatives:
+                attrs = edge_data if join_keys is None else {**edge_data, "JoinKeys": join_keys}
+                relations.append({
+                    "source": path[i],
+                    "target": path[i + 1],
+                    "edge_attributes": attrs,
+                    "node1_attributes": GObj.nodes[path[i]],
+                    "node2_attributes": GObj.nodes[path[i + 1]],
+                })
 
     deduped = []
     seen = set()

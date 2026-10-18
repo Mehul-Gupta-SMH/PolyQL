@@ -108,10 +108,10 @@ def getRelations(GObj: nx.DiGraph, target_nodes: list):
     # Find shortest path visiting all target nodes exactly once
     for comb in combs:
 
-        # Check if there is an edge between consecutive target nodes
-        if not nx.has_path(GObj, comb[0].lower(), comb[1].lower()):
-            is_valid_path = False
-            break
+        # Skip pairs with no connecting path; keep resolving the remaining pairs
+        if (comb[0].lower() not in GObj or comb[1].lower() not in GObj
+                or not nx.has_path(GObj, comb[0].lower(), comb[1].lower())):
+            continue
 
         # Compute the shortest path length between consecutive target nodes
         path = nx.shortest_path(GObj, source=comb[0].lower(), target=comb[1].lower())
