@@ -107,3 +107,4 @@ Guidelines and context for AI-assisted development on this project.
 | 2026-03-22 | `APIManager/PromptBuilder.py` | SL2: `format_schema()` renders `## Business Definitions` block from `context['glossary_hits']` — term name, formula, table deps, example — prepended before schema section |
 | 2026-03-22 | `backend/glossary.py`, `backend/app.py` | SL3: Glossary REST API (single/bulk POST, GET, PUT, DELETE, lexical search); CORS updated to allow PUT |
 | 2026-03-22 | `tests/test_glossary_store.py`, `tests/test_glossary_retrieval.py` | SL6: 35 CRUD tests + 19 semantic/injection tests; all 247 suite tests pass |
+| 2026-10-18 | `MetadataManager/MetadataStore/relationdb/kuzuDB.py`, `networkxDB.py`, `tests/test_kuzu.py` | #30: `getRelations` skips unreachable pairs instead of aborting; role-playing joins preserved via `JoinKeysAlternatives` edge attribute; 3 new tests (250 total) |

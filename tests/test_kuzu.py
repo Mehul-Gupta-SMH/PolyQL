@@ -95,3 +95,53 @@ def test_getObj_attempts_pickle_migration(tmp_path, monkeypatch):
     assert captured["called"] is True
     assert graph.has_edge("legacy", "db")
     assert graph["legacy"]["db"]["JoinKeys"] == "legacy.relation = db.id"
+
+
+def test_getRelations_skips_unreachable_pair_and_resolves_rest(tmp_path, monkeypatch):
+    _prepare_temp_relations(monkeypatch, tmp_path)
+    graph = kuzuDB.getObj("disconnected-instance")
+    kuzuDB.addRelations(
+        graph,
+        [
+            ("Orders", "Customers", "orders.customer_id = customers.id"),
+            ("Customers", "Regions", "customers.region_id = regions.id"),
+        ],
+        instance_name="disconnected-instance",
+    )
+    kuzuDB._merge_node(kuzuDB._get_conn("disconnected-instance"), "audit_log")
+
+    graph = kuzuDB.getObj("disconnected-instance")
+    # The first pair (orders, audit_log) has no path; later pairs must still resolve.
+    relations = kuzuDB.getRelations(graph, ["Orders", "Audit_Log", "Regions", "Unknown_Table"])
+
+    hops = {(r["source"], r["target"]) for r in relations}
+    assert hops == {("orders", "customers"), ("customers", "regions")}
+
+
+def test_role_playing_join_keys_are_preserved(tmp_path, monkeypatch):
+    _prepare_temp_relations(monkeypatch, tmp_path)
+    order_date = "orders.order_date_id = dim_date.date_id"
+    ship_date = "orders.ship_date_id = dim_date.date_id"
+    graph = kuzuDB.getObj("role-instance")
+    kuzuDB.addRelations(
+        graph,
+        [("Orders", "Dim_Date", order_date), ("Orders", "Dim_Date", ship_date)],
+        instance_name="role-instance",
+    )
+
+    # In-place update and reload from Kuzu both keep both conditions
+    for g in (graph, kuzuDB.getObj("role-instance")):
+        assert g["orders"]["dim_date"]["JoinKeysAlternatives"] == [order_date, ship_date]
+        assert g["orders"]["dim_date"]["JoinKeys"] == order_date
+
+    relations = kuzuDB.getRelations(kuzuDB.getObj("role-instance"), ["Orders", "Dim_Date"])
+    assert [r["edge_attributes"]["JoinKeys"] for r in relations] == [order_date, ship_date]
+
+
+def test_empty_join_keys_dropped_when_real_condition_exists():
+    graph = nx.DiGraph()
+    kuzuDB._add_graph_edge(graph, "a", "b", "")
+    kuzuDB._add_graph_edge(graph, "a", "b", "a.id = b.a_id")
+
+    assert graph["a"]["b"]["JoinKeys"] == "a.id = b.a_id"
+    assert "JoinKeysAlternatives" not in graph["a"]["b"]
