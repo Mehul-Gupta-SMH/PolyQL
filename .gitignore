@@ -40,3 +40,6 @@ benchmark/minidev.zip
 benchmark/**/*.sqlite
 benchmark/**/*.zip
 benchmark/**/*.sql
+
+# Kuzu databases created at the repo root by test runs
+/kuzudb/
