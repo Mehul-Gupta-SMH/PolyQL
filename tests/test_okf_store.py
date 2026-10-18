@@ -1,0 +1,317 @@
+"""
+Tests for OKF (Open Knowledge Format) support in table search.
+
+Coverage:
+  - load_bundle / parse_concept: frontmatter, reserved files, hidden dirs, non-conforming docs, links
+  - table_candidates / resolve_tables: resource URIs, titles, qualified names
+  - import_bundle: one-hop link expansion, deprecated concepts, stable IDs
+  - get_okf_tables: distance cutoff, instance filter, unknown tables, error fallback
+  - SQLBuilderSupport.__addOKFTables__: adds OKF tables after vector results, config gating
+  - POST /api/okf/import: auth + error mapping
+
+ChromaDB and the embedding model are mocked — no real model or vector DB required.
+"""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from MetadataManager import OKFStore
+
+
+def _write(root, rel, text):
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+@pytest.fixture()
+def bundle(tmp_path):
+    """A small OKF v0.2 bundle: two table concepts, a metric linking to one, plus edge cases."""
+    _write(tmp_path, "index.md", "---\nokf_version: \"0.2\"\n---\n# Tables\n- [orders](/tables/orders.md)\n")
+    _write(tmp_path, "log.md", "# 2026-10-01\n- **Update** added orders\n")
+    _write(tmp_path, "tables/orders.md", (
+        "---\n"
+        "type: BigQuery Table\n"
+        "title: Customer Orders\n"
+        "description: One row per order placed.\n"
+        "resource: https://console.cloud.google.com/bigquery?p=acme&d=sales&t=orders\n"
+        "tags: [sales, orders]\n"
+        "---\n"
+        "# Joins\nJoins [customers](./customers.md) on `customer_id`.\n"
+    ))
+    _write(tmp_path, "tables/customers.md", "---\ntype: Table\ntitle: Customers\n---\nOne row per customer.\n")
+    _write(tmp_path, "metrics/revenue.md", (
+        "---\ntype: Metric\ntitle: Revenue\ndescription: Recognised revenue.\n---\n"
+        "Sum of delivered orders. Joins on [orders](/tables/orders.md). "
+        "See [policy](https://example.com/policy) and [notes](#definition).\n"
+    ))
+    _write(tmp_path, "metrics/old_revenue.md", "---\ntype: Metric\ntitle: Old revenue\nstatus: deprecated\n---\nOld.\n")
+    _write(tmp_path, "notes/broken.md", "no frontmatter here\n")
+    _write(tmp_path, "notes/no_type.md", "---\ntitle: Missing type\n---\nBody\n")
+    _write(tmp_path, ".git/ignored.md", "---\ntype: Note\n---\n")
+    return tmp_path
+
+
+# ---------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------
+
+class TestLoadBundle:
+    def test_loads_conforming_concepts_and_skips_rest(self, bundle):
+        concepts, skipped = OKFStore.load_bundle(str(bundle))
+        ids = {c["concept_id"] for c in concepts}
+
+        assert ids == {"/tables/orders", "/tables/customers", "/metrics/revenue", "/metrics/old_revenue"}
+        assert set(skipped) == {"/notes/broken", "/notes/no_type"}
+
+    def test_parses_frontmatter_fields(self, bundle):
+        concepts, _ = OKFStore.load_bundle(str(bundle))
+        orders = next(c for c in concepts if c["concept_id"] == "/tables/orders")
+
+        assert orders["type"] == "BigQuery Table"
+        assert orders["title"] == "Customer Orders"
+        assert orders["tags"] == ["sales", "orders"]
+        assert orders["status"] == "stable"
+
+    def test_links_resolve_relative_and_absolute_and_skip_external(self, bundle):
+        concepts, _ = OKFStore.load_bundle(str(bundle))
+        by_id = {c["concept_id"]: c for c in concepts}
+
+        assert by_id["/tables/orders"]["links"] == ["/tables/customers"]
+        assert by_id["/metrics/revenue"]["links"] == ["/tables/orders"]
+
+    def test_missing_directory_raises(self, tmp_path):
+        with pytest.raises(ValueError):
+            OKFStore.load_bundle(str(tmp_path / "nope"))
+
+    def test_title_defaults_to_file_name(self):
+        concept = OKFStore.parse_concept("---\ntype: Table\n---\n", "/tables/line_items")
+        assert concept["title"] == "line_items"
+
+
+# ---------------------------------------------------------------------------
+# Concept → table mapping
+# ---------------------------------------------------------------------------
+
+class TestTableMapping:
+    def test_table_candidates_from_resource_title_and_file(self, bundle):
+        concepts, _ = OKFStore.load_bundle(str(bundle))
+        orders = next(c for c in concepts if c["concept_id"] == "/tables/orders")
+
+        assert OKFStore.table_candidates(orders) == ["orders", "bigquery", "customer_orders"]
+
+    def test_explicit_table_key_comes_first(self):
+        concept = OKFStore.parse_concept("---\ntype: View\ntable: sales.v_orders\n---\n", "/views/x")
+        assert OKFStore.table_candidates(concept)[0] == "sales.v_orders"
+
+    def test_non_table_concept_has_no_own_candidates(self):
+        concept = OKFStore.parse_concept("---\ntype: Metric\n---\n", "/metrics/revenue")
+        assert OKFStore.table_candidates(concept) == []
+
+    def test_metric_inherits_linked_table_candidates(self, bundle):
+        concepts, _ = OKFStore.load_bundle(str(bundle))
+        by_id = {c["concept_id"]: c for c in concepts}
+
+        assert "orders" in OKFStore.concept_table_candidates(by_id["/metrics/revenue"], by_id)
+
+    def test_resolve_tables_exact_and_qualified(self):
+        known = ["sales.public.orders", "Customers", "dim_date"]
+
+        assert OKFStore.resolve_tables(["orders"], known) == ["sales.public.orders"]
+        assert OKFStore.resolve_tables(["customers"], known) == ["Customers"]
+        assert OKFStore.resolve_tables(["proj.ds.dim_date"], known) == ["dim_date"]
+        assert OKFStore.resolve_tables(["bigquery", "unknown"], known) == []
+
+
+# ---------------------------------------------------------------------------
+# Indexing
+# ---------------------------------------------------------------------------
+
+def _model():
+    model = MagicMock()
+    model.encode.return_value.tolist.return_value = [0.1, 0.2]
+    return model
+
+
+class TestImportBundle:
+    def test_indexes_active_concepts_with_table_candidates(self, bundle):
+        with patch("MetadataManager.MetadataStore.vdb.Chroma.addData") as add_data:
+            summary = OKFStore.import_bundle(str(bundle), _model(), MagicMock(), instance_name="prod")
+
+        assert summary == {
+            "indexed": 3, "skipped": ["/notes/broken", "/notes/no_type"],
+            "deprecated": 1, "table_concepts": 2,
+        }
+        records = add_data.call_args[0][1]
+        meta = {r["metadata"]["concept_id"]: r["metadata"] for r in records}
+        assert meta["/metrics/revenue"]["tables"].split(",")[0] == "orders"
+        assert all(m["instance_name"] == "prod" for m in meta.values())
+        assert add_data.call_args[0][2]["collection_name"] == "okf_concepts"
+
+    def test_ids_are_stable_across_imports(self, bundle):
+        with patch("MetadataManager.MetadataStore.vdb.Chroma.addData") as add_data:
+            OKFStore.import_bundle(str(bundle), _model(), MagicMock())
+            OKFStore.import_bundle(str(bundle), _model(), MagicMock())
+
+        first, second = (sorted(r["id"] for r in call[0][1]) for call in add_data.call_args_list)
+        assert first == second
+
+
+# ---------------------------------------------------------------------------
+# Query-time search
+# ---------------------------------------------------------------------------
+
+def _raw(*hits):
+    """Fake ChromaDB query result from (metadata, distance) pairs."""
+    return {"metadatas": [[h[0] for h in hits]], "distances": [[h[1] for h in hits]]}
+
+
+class TestGetOKFTables:
+    KNOWN = ["orders", "customers", "dim_date"]
+
+    def test_returns_resolved_tables_within_distance(self):
+        raw = _raw(
+            ({"concept_id": "/metrics/revenue", "title": "Revenue", "tables": "orders,missing"}, 0.2),
+            ({"concept_id": "/tables/customers", "title": "Customers", "tables": "customers"}, 0.9),
+        )
+        with patch("MetadataManager.MetadataStore.vdb.Chroma.getData", return_value=raw):
+            hits = OKFStore.get_okf_tables("revenue", self.KNOWN, _model(), MagicMock(), max_distance=0.5)
+
+        assert [h["table"] for h in hits] == ["orders"]
+        assert hits[0]["concept_id"] == "/metrics/revenue"
+
+    def test_best_concept_wins_and_tables_are_unique(self):
+        raw = _raw(
+            ({"concept_id": "/b", "tables": "orders"}, 0.4),
+            ({"concept_id": "/a", "tables": "orders,customers"}, 0.1),
+        )
+        with patch("MetadataManager.MetadataStore.vdb.Chroma.getData", return_value=raw):
+            hits = OKFStore.get_okf_tables("q", self.KNOWN, _model(), MagicMock())
+
+        assert [(h["table"], h["concept_id"]) for h in hits] == [("orders", "/a"), ("customers", "/a")]
+
+    def test_instance_filter_only_for_named_instances(self):
+        with patch("MetadataManager.MetadataStore.vdb.Chroma.getData", return_value=_raw()) as get_data:
+            OKFStore.get_okf_tables("q", self.KNOWN, _model(), MagicMock(), instance_name="prod")
+            OKFStore.get_okf_tables("q", self.KNOWN, _model(), MagicMock(), instance_name="default")
+
+        assert get_data.call_args_list[0].kwargs == {"instance_name": "prod"}
+        assert get_data.call_args_list[1].kwargs == {}
+
+    def test_missing_collection_returns_empty(self):
+        with patch("MetadataManager.MetadataStore.vdb.Chroma.getData", side_effect=ValueError("no collection")):
+            assert OKFStore.get_okf_tables("q", self.KNOWN, _model(), MagicMock()) == []
+
+
+# ---------------------------------------------------------------------------
+# Table-search integration
+# ---------------------------------------------------------------------------
+
+def _support(instance_name="default"):
+    from SQLBuilderComponents import SQLBuilderSupport
+
+    obj = SQLBuilderSupport.__new__(SQLBuilderSupport)
+    obj.user_query = "monthly revenue"
+    obj.instance_name = instance_name
+    obj.table_list = {"direct": {"customers": {"description": "vector hit", "columns": {}}}, "intermediate": {}}
+    obj.tmddb_config = {"tableDescName": "tableDesc"}
+    obj.DBObj = MagicMock()
+    obj.DBObj.get_data.return_value = [("orders", "Order facts"), ("customers", "Customer dim")]
+    return obj
+
+
+def _rag():
+    rag = MagicMock()
+    rag.embedding_model = _model()
+    return rag
+
+
+class TestAddOKFTables:
+    CFG = {"enabled": True, "top_k": 5, "max_distance": 0.4}
+
+    def test_adds_okf_tables_after_vector_hits(self):
+        obj = _support()
+        hits = [
+            {"table": "customers", "concept_id": "/c", "description": "", "distance": 0.1},
+            {"table": "orders", "concept_id": "/metrics/revenue", "description": "", "distance": 0.2},
+        ]
+        with patch("SQLBuilderComponents.get_config_val", return_value=self.CFG), \
+             patch("MetadataManager.OKFStore.get_okf_tables", return_value=hits) as get_tables:
+            obj.__addOKFTables__(_rag())
+
+        assert list(obj.table_list["direct"]) == ["customers", "orders"]
+        assert obj.table_list["direct"]["customers"]["description"] == "vector hit"
+        assert obj.table_list["direct"]["orders"]["description"] == "Order facts"
+        assert get_tables.call_args.kwargs["top_k"] == 5
+        assert get_tables.call_args.kwargs["max_distance"] == 0.4
+
+    def test_known_tables_scoped_to_instance(self):
+        obj = _support(instance_name="prod")
+        with patch("SQLBuilderComponents.get_config_val", return_value=self.CFG), \
+             patch("MetadataManager.OKFStore.get_okf_tables", return_value=[]):
+            obj.__addOKFTables__(_rag())
+
+        assert obj.DBObj.get_data.call_args[0][1] == {"instance_name": "prod"}
+
+    @pytest.mark.parametrize("cfg", [{"enabled": False}, KeyError("okf")])
+    def test_disabled_or_missing_config_is_noop(self, cfg):
+        obj = _support()
+        side = cfg if isinstance(cfg, Exception) else None
+        with patch("SQLBuilderComponents.get_config_val", return_value=cfg, side_effect=side), \
+             patch("MetadataManager.OKFStore.get_okf_tables") as get_tables:
+            obj.__addOKFTables__(_rag())
+
+        get_tables.assert_not_called()
+        assert list(obj.table_list["direct"]) == ["customers"]
+
+
+# ---------------------------------------------------------------------------
+# REST endpoint
+# ---------------------------------------------------------------------------
+
+class TestImportEndpoint:
+    # conftest.py overrides get_current_user for every test, so the client is authenticated
+    @pytest.fixture()
+    def client(self):
+        from fastapi.testclient import TestClient
+
+        from backend.app import app
+
+        return TestClient(app)
+
+    def test_requires_auth(self, client):
+        from backend.app import app
+        from backend.auth import get_current_user
+
+        override = app.dependency_overrides.pop(get_current_user)
+        try:
+            resp = client.post("/api/okf/import", json={"path": "/tmp"})
+        finally:
+            app.dependency_overrides[get_current_user] = override
+        assert resp.status_code == 401
+
+    def test_import_returns_summary(self, client):
+        summary = {"indexed": 3, "skipped": [], "deprecated": 0, "table_concepts": 2}
+        with patch("MetadataManager.MetadataStore.RAGPipeline.ManageInformation"), \
+             patch("MetadataManager.OKFStore.import_bundle", return_value=summary) as imp:
+            resp = client.post("/api/okf/import", json={"path": "/bundles/acme", "instance_name": "prod"})
+
+        assert resp.status_code == 200
+        assert resp.json() == summary
+        assert imp.call_args.args[0] == "/bundles/acme"
+        assert imp.call_args.kwargs["instance_name"] == "prod"
+
+    def test_bad_path_returns_400(self, client):
+        with patch("MetadataManager.MetadataStore.RAGPipeline.ManageInformation"), \
+             patch("MetadataManager.OKFStore.import_bundle", side_effect=ValueError("not a directory")):
+            resp = client.post("/api/okf/import", json={"path": "/nope"})
+
+        assert resp.status_code == 400
+        assert "not a directory" in resp.json()["detail"]
+
+
+def test_bom_prefixed_concept_is_parsed(tmp_path):
+    (tmp_path / "orders.md").write_bytes("﻿---\ntype: Table\n---\nBody\n".encode("utf-8"))
+    concepts, skipped = OKFStore.load_bundle(str(tmp_path))
+    assert [c["concept_id"] for c in concepts] == ["/orders"] and skipped == []

@@ -58,6 +58,7 @@ Ask *"Which customers placed the most orders last quarter?"* and get a ready-to-
 | **Join Path explorer** | Select any two tables and instantly see the shortest JOIN route, with join keys and cardinality annotations |
 | **Derivative Tables** | See which tables were built from a source table via pipeline SQL, and which tables a derived table originates from |
 | **Qualified table names** | Full `database.schema.table` notation supported in pipeline ingestion — qualifiers are preserved through parsing and stored correctly |
+| **OKF knowledge bundles** | Import an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) bundle (`POST /api/okf/import`); table search adds the tables that matching concepts describe or link to — e.g. a *Revenue* metric that links to `orders` pulls in `orders` |
 | **Business Semantic Layer** | Define business terms (KPIs, formulas, synonyms) in a glossary; terms are embedded and injected into the LLM prompt when semantically relevant — ensures canonical definitions are always used |
 | **Execution outcome tracking** | Every query run via the UI records a success / empty / failure verdict with latency and error details — powers the future validation layer |
 | **Benchmark evaluation** | BIRD and Spider text-to-SQL benchmark harness — ingest, run batch inference, compute EX and VES metrics per difficulty and per DB |

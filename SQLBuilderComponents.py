@@ -135,6 +135,59 @@ class SQLBuilderSupport:
         # Updating the 'direct' table list attribute with the filtered results
         self.table_list["direct"] = filtered_results
 
+        # Add tables that matching OKF concepts point at
+        self.__addOKFTables__(RetrievalObj)
+
+    def __addOKFTables__(self, RetrievalObj):
+        """
+        Add tables referenced by OKF concepts relevant to the user's query.
+
+        Reuses the embedding model and ChromaDB client already loaded for table
+        retrieval. Only tables that exist in table metadata for this instance are
+        added, after the vector-search results. No-op when the `okf` config
+        section is missing or disabled, or when no bundle has been imported.
+        """
+        try:
+            okf_cfg = get_config_val("retrieval_config", ["okf"], True) or {}
+        except Exception:
+            return
+        if not okf_cfg.get("enabled", False):
+            return
+
+        from MetadataManager.OKFStore import get_okf_tables
+
+        inst_filter = {}
+        if self.instance_name != "default":
+            inst_filter = {"instance_name": self.instance_name}
+        rows = self.DBObj.get_data(
+            self.tmddb_config['tableDescName'], inst_filter, ['tableName', 'Desc'], fetchtype="All",
+        ) or []
+        known = {row[0]: row[1] for row in rows if row and row[0]}
+        if not known:
+            return
+
+        hits = get_okf_tables(
+            self.user_query,
+            list(known),
+            RetrievalObj.embedding_model,
+            RetrievalObj.vdb.client,
+            instance_name=self.instance_name,
+            top_k=int(okf_cfg.get("top_k", 3)),
+            max_distance=float(okf_cfg.get("max_distance", 0.5)),
+        )
+
+        for hit in hits:
+            if hit["table"] in self.table_list["direct"]:
+                continue
+            self.table_list["direct"][hit["table"]] = {
+                "description": known[hit["table"]] or hit["description"],
+                "columns": {},
+            }
+            logger.debug(
+                "OKF: added table %r via concept %r (distance %.3f)",
+                hit["table"], hit["concept_id"], hit["distance"],
+            )
+
 
     def __getTableRelations__(self):
         """

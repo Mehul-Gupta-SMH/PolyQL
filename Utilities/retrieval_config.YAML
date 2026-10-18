@@ -55,6 +55,11 @@ tableMDdb:
 gather_requirements:
   max_tool_calls: 5   # max schema-fetch tool calls before fallback question
 
+okf:
+  enabled: true          # add tables pointed at by matching OKF concepts during table search
+  top_k: 3               # concepts retrieved per query
+  max_distance: 0.5      # cosine distance cutoff; concepts further away are ignored
+
 re_retrieval:
   max_rounds: 3          # total query attempts (initial + up to 2 rewrites)
   min_direct_tables: 2   # stop early when this many direct tables are found
