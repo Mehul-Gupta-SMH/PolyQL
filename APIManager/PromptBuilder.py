@@ -1,4 +1,5 @@
 import pathlib
+import re
 
 _PROMPTS_DIR = pathlib.Path(__file__).parent / "Prompts"
 
@@ -89,11 +90,12 @@ class PromptBuilder:
         Args:
             context (dict): Dict with keys 'user_query', 'table_list', 'join_keys',
                             and optionally 'glossary_hits' (list of business term dicts
-                            from GlossaryStore.get_business_context).
+                            from GlossaryStore.get_business_context) and 'okf_hits'
+                            (list of OKF concept dicts from OKFStore.search_concepts).
 
         Returns:
-            str: Markdown-formatted schema and question, with an optional
-                 ## Business Definitions block prepended when glossary_hits is present.
+            str: Markdown-formatted schema and question, with optional
+                 ## Business Definitions and ## Knowledge Notes blocks before the schema.
         """
         lines = []
 
@@ -138,6 +140,36 @@ class PromptBuilder:
                 if hit.get("example_value"):
                     lines.append(f"**Example:** {hit['example_value']}")
 
+                lines.append("")
+
+        # OKF: curated knowledge concepts matched during table search
+        okf_hits = context.get("okf_hits") or []
+        if okf_hits:
+            lines.append("## Knowledge Notes")
+            lines.append(
+                "Curated notes from the team's knowledge base (OKF) that match this question. "
+                "Follow them where they apply — e.g. which column or filter defines a term, "
+                "history/SCD rules, or which table to join through."
+            )
+            lines.append("")
+            for hit in okf_hits:
+                header = f"### {hit.get('title') or hit.get('concept_id') or 'Note'}"
+                if hit.get("type"):
+                    header += f" ({hit['type']})"
+                lines.append(header)
+
+                if hit.get("description"):
+                    lines.append(f"> {hit['description']}")
+                if hit.get("tables"):
+                    lines.append(f"**Tables:** {', '.join(hit['tables'])}")
+
+                body = (hit.get("body") or "").strip()
+                if body:
+                    lines.append("")
+                    for body_line in body.splitlines():
+                        # Demote the note's own headings so they don't break this structure
+                        heading = re.match(r"^#{1,6}\s+(.*)$", body_line)
+                        lines.append(f"**{heading.group(1).strip()}**" if heading else body_line)
                 lines.append("")
 
         lines.append("## Database Schema")

@@ -59,6 +59,8 @@ okf:
   enabled: true          # add tables pointed at by matching OKF concepts during table search
   top_k: 3               # concepts retrieved per query
   max_distance: 0.5      # cosine distance cutoff; concepts further away are ignored
+  include_in_prompt: true  # render matched concepts as a ## Knowledge Notes block
+  prompt_chars: 800      # max characters of each concept's body in the prompt
 
 re_retrieval:
   max_rounds: 3          # total query attempts (initial + up to 2 rewrites)

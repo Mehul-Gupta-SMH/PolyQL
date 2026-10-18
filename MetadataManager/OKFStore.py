@@ -267,6 +267,7 @@ def import_bundle(
                 "type":          concept["type"],
                 "title":         concept["title"],
                 "description":   concept["description"][:500],
+                "body":          concept["body"][:_BODY_CHARS],
                 # ChromaDB metadata values must be scalars
                 "tables":        ",".join(concept_table_candidates(concept, by_id)),
                 "instance_name": instance_name,
@@ -295,6 +296,88 @@ def import_bundle(
 # Query-time table search
 # ---------------------------------------------------------------------------
 
+def search_concepts(
+    query: str,
+    known_tables: list,
+    embedding_model,
+    chroma_client,
+    instance_name: str = "default",
+    top_k: int = 3,
+    max_distance: float = 0.5,
+) -> list:
+    """
+    Find the OKF concepts relevant to *query*.
+
+    Returns a list of {concept_id, title, type, description, body, tables,
+    distance} ordered by distance, where `tables` are the concept's candidate
+    tables resolved against *known_tables*. Concepts that point at no known
+    table are kept: their text can still guide the SQL (e.g. a playbook).
+    Falls back to [] on any error (no bundle imported, collection missing, etc.).
+    """
+    from MetadataManager.MetadataStore.vdb.Chroma import getData
+
+    try:
+        extra = {}
+        if instance_name and instance_name != "default":
+            extra["instance_name"] = instance_name
+        raw = getData(
+            chroma_client,
+            embedding_model.encode(query).tolist(),
+            {"collection_name": _COLLECTION, "n_chunks": top_k},
+            **extra,
+        )
+    except Exception as exc:
+        logger.debug("OKFStore.search_concepts: no OKF context — %s", exc)
+        return []
+
+    metadatas = (raw.get("metadatas") or [[]])[0]
+    distances = (raw.get("distances") or [[]])[0]
+    documents = (raw.get("documents") or [[]])[0]
+    documents = list(documents) + [""] * (len(metadatas) - len(documents))
+
+    concepts = []
+    for meta, dist, doc in sorted(
+        zip(metadatas, distances, documents, strict=False), key=lambda x: x[1]
+    ):
+        if dist > max_distance:
+            continue
+        candidates = [c for c in (meta.get("tables") or "").split(",") if c]
+        concepts.append({
+            "concept_id":  meta.get("concept_id", ""),
+            "title":       meta.get("title", ""),
+            "type":        meta.get("type", ""),
+            "description": meta.get("description", ""),
+            # bundles imported before `body` was stored fall back to the embedded document
+            "body":        meta.get("body") if meta.get("body") is not None else (doc or ""),
+            "tables":      resolve_tables(candidates, known_tables),
+            "distance":    dist,
+        })
+    return concepts
+
+
+def tables_from_concepts(concepts: list) -> list:
+    """
+    Flatten concept hits into one entry per table (best concept wins).
+
+    Returns a list of {table, concept_id, title, type, description, distance}.
+    """
+    hits, seen = [], set()
+    for concept in concepts:
+        for table in concept["tables"]:
+            if table in seen:
+                continue
+            seen.add(table)
+            hits.append({
+                "table":       table,
+                "concept_id":  concept["concept_id"],
+                "title":       concept["title"],
+                "type":        concept["type"],
+                "description": concept["description"],
+                "distance":    concept["distance"],
+            })
+    return hits
+
+
 def get_okf_tables(
     query: str,
     known_tables: list,
@@ -311,40 +394,7 @@ def get_okf_tables(
     ordered by concept distance, one entry per table (best concept wins).
     Falls back to [] on any error (no bundle imported, collection missing, etc.).
     """
-    from MetadataManager.MetadataStore.vdb.Chroma import getData
-
-    try:
-        extra = {}
-        if instance_name and instance_name != "default":
-            extra["instance_name"] = instance_name
-        raw = getData(
-            chroma_client,
-            embedding_model.encode(query).tolist(),
-            {"collection_name": _COLLECTION, "n_chunks": top_k},
-            **extra,
-        )
-    except Exception as exc:
-        logger.debug("OKFStore.get_okf_tables: no OKF context — %s", exc)
-        return []
-
-    metadatas = (raw.get("metadatas") or [[]])[0]
-    distances = (raw.get("distances") or [[]])[0]
-
-    hits, seen = [], set()
-    for meta, dist in sorted(zip(metadatas, distances, strict=False), key=lambda x: x[1]):
-        if dist > max_distance:
-            continue
-        candidates = [c for c in (meta.get("tables") or "").split(",") if c]
-        for table in resolve_tables(candidates, known_tables):
-            if table in seen:
-                continue
-            seen.add(table)
-            hits.append({
-                "table":       table,
-                "concept_id":  meta.get("concept_id", ""),
-                "title":       meta.get("title", ""),
-                "type":        meta.get("type", ""),
-                "description": meta.get("description", ""),
-                "distance":    dist,
-            })
-    return hits
+    return tables_from_concepts(search_concepts(
+        query, known_tables, embedding_model, chroma_client,
+        instance_name=instance_name, top_k=top_k, max_distance=max_distance,
+    ))
