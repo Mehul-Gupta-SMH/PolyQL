@@ -62,6 +62,7 @@ Ask *"Which customers placed the most orders last quarter?"* and get a ready-to-
 | **Business Semantic Layer** | Define business terms (KPIs, formulas, synonyms) in a glossary; terms are embedded and injected into the LLM prompt when semantically relevant — ensures canonical definitions are always used |
 | **Execution outcome tracking** | Every query run via the UI records a success / empty / failure verdict with latency and error details — powers the future validation layer |
 | **Benchmark evaluation** | BIRD and Spider text-to-SQL benchmark harness — ingest, run batch inference, compute EX and VES metrics per difficulty and per DB |
+| **Use from your agent (MCP)** | `python backend/mcp_server.py` exposes table search, join paths, glossary, OKF notes and SQL validation as MCP tools for Claude Code, Codex and agent frameworks — the agent writes the SQL, no extra API key. See [docs/mcp.md](docs/mcp.md) |
 | **Observability** | JSON-structured request logs and a `GET /metrics` Prometheus endpoint for request latencies, error rates, and LLM call counts per provider |
 | **User accounts** | Login / register with username + password, or **Sign in with Google** |
 | **Session history** | Conversations are saved per user and accessible across sessions |
@@ -229,6 +230,19 @@ curl -X POST http://localhost:8000/api/glossary/terms/single \
 ```
 
 Terms are embedded into ChromaDB. When a user asks about "ARR" or "recurring revenue", the matching terms are prepended to the schema section so the LLM uses the canonical formula.
+
+---
+
+## Use Poly-QL from your agent (MCP)
+
+Poly-QL can run as an MCP server, so coding agents and agent frameworks get its schema knowledge as tools:
+
+```bash
+pip install "mcp>=2.2,<3"
+claude mcp add polyql -- python /path/to/PolyQL/backend/mcp_server.py   # Claude Code
+```
+
+Tools: `list_instances`, `list_tables`, `search_schema`, `get_table_schema`, `find_join_path`, `get_business_terms`, `validate_sql`. All are read-only and none calls an LLM; the agent writes the SQL. Setup for Codex, HTTP, the Claude Agent SDK, the OpenAI Agents SDK and LangGraph is in [docs/mcp.md](docs/mcp.md).
 
 ---
 
