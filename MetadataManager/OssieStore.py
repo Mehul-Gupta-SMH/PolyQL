@@ -444,8 +444,16 @@ def build_model(name: str, tables: dict, edges: list, unique_columns: set, terms
     return model
 
 
-def build_document(instance_name: str = "default", name: str | None = None) -> str:
-    """Export an instance's tables, join graph and glossary as an Ossie YAML document."""
+def read_instance(instance_name: str = "default") -> tuple:
+    """
+    Read an instance's metadata for export.
+
+    Returns (tables, edges, unique_columns, terms):
+      tables          {table: {"desc", "columns": [(name, type, constraints, desc, expression)]}}
+      edges           [(table_a, table_b, join_keys)] — fk join edges with keys
+      unique_columns  {(table, column)} PRIMARY KEY / UNIQUE
+      terms           glossary term dicts
+    """
     from MetadataManager import GlossaryStore
     from MetadataManager.MetadataStore.relationdb import kuzuDB
     from MetadataManager.MetadataStore.relationdb.joinpath import is_join_edge, load_unique_columns
@@ -481,6 +489,11 @@ def build_document(instance_name: str = "default", name: str | None = None) -> s
     terms = GlossaryStore.list_terms(
         instance_name=None if instance_name == "default" else instance_name
     )
-    model = build_model(name or f"polyql_{instance_name}", tables, edges,
-                        load_unique_columns(instance_name), terms)
+    return tables, edges, load_unique_columns(instance_name), terms
+
+
+def build_document(instance_name: str = "default", name: str | None = None) -> str:
+    """Export an instance's tables, join graph and glossary as an Ossie YAML document."""
+    tables, edges, unique_columns, terms = read_instance(instance_name)
+    model = build_model(name or f"polyql_{instance_name}", tables, edges, unique_columns, terms)
     return yaml.safe_dump(model, sort_keys=False, allow_unicode=True)

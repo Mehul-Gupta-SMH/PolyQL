@@ -21,6 +21,7 @@ embedding model and ChromaDB client from the caller, so the table-search
 step reuses the ones it already has loaded.
 """
 
+import json
 import logging
 import posixpath
 import re
@@ -237,20 +238,26 @@ def import_bundle(
     embedding_model,
     chroma_client,
     instance_name: str = "default",
+    bundle_name: str | None = None,
 ) -> dict:
     """
     Embed every active concept of an OKF bundle into the 'okf_concepts' collection.
 
-    Concepts with status 'deprecated' are not indexed. Re-importing a bundle
-    upserts concepts by (instance_name, concept_id).
+    Concepts with status 'deprecated' are not indexed. Every concept is tagged
+    with *bundle_name* (default: the bundle directory's name) so the bundle can
+    be listed and removed later; re-importing a bundle replaces its concepts,
+    so concepts removed from the bundle disappear too. Concept ids are unique
+    per (instance_name, concept_id) — a concept in another bundle with the same
+    id is taken over by the newer import.
 
     Returns:
-        dict: {indexed, skipped, deprecated, table_concepts}
+        dict: {bundle, indexed, skipped, deprecated, table_concepts}
     """
     from MetadataManager.MetadataStore.vdb.Chroma import addData
 
     concepts, skipped = load_bundle(bundle_path)
     by_id = {c["concept_id"]: c for c in concepts}
+    bundle_name = bundle_name or Path(bundle_path).expanduser().resolve().name
 
     data, deprecated, table_concepts = [], 0, 0
     for concept in concepts:
@@ -271,12 +278,14 @@ def import_bundle(
                 # ChromaDB metadata values must be scalars
                 "tables":        ",".join(concept_table_candidates(concept, by_id)),
                 "instance_name": instance_name,
+                "bundle":        bundle_name,
             },
             "id": str(uuid.uuid3(
                 uuid.NAMESPACE_URL, f"okf:{instance_name}:{concept['concept_id']}"
             )),
         })
 
+    delete_bundle(chroma_client, instance_name, bundle_name)
     if data:
         addData(chroma_client, data, {"collection_name": _COLLECTION, "sim_metric": "cosine"})
 
@@ -285,6 +294,7 @@ def import_bundle(
         bundle_path, instance_name, len(data), len(skipped), deprecated,
     )
     return {
+        "bundle": bundle_name,
         "indexed": len(data),
         "skipped": skipped,
         "deprecated": deprecated,
@@ -398,3 +408,139 @@ def get_okf_tables(
         query, known_tables, embedding_model, chroma_client,
         instance_name=instance_name, top_k=top_k, max_distance=max_distance,
     ))
+
+
+# ---------------------------------------------------------------------------
+# Managing imported bundles
+# ---------------------------------------------------------------------------
+
+# Bundle name listed for concepts imported before bundles were tracked
+UNNAMED_BUNDLE = "(unnamed)"
+
+
+def _collection(chroma_client):
+    try:
+        return chroma_client.get_collection(name=_COLLECTION)
+    except Exception:
+        return None  # nothing imported yet
+
+
+def list_bundles(chroma_client) -> list:
+    """Imported bundles: [{instance_name, bundle, concepts}] sorted by instance then bundle."""
+    collection = _collection(chroma_client)
+    if collection is None:
+        return []
+    counts: dict = {}
+    for meta in collection.get(include=["metadatas"]).get("metadatas") or []:
+        key = (meta.get("instance_name") or "default", meta.get("bundle") or UNNAMED_BUNDLE)
+        counts[key] = counts.get(key, 0) + 1
+    return [{"instance_name": i, "bundle": b, "concepts": n}
+            for (i, b), n in sorted(counts.items())]
+
+
+def delete_bundle(chroma_client, instance_name: str, bundle: str | None = None) -> int:
+    """
+    Remove an instance's imported concepts — one bundle, or all of them when
+    *bundle* is None. Returns the number of concepts removed.
+    """
+    collection = _collection(chroma_client)
+    if collection is None:
+        return 0
+    found = collection.get(where={"instance_name": instance_name}, include=["metadatas"])
+    ids = [
+        cid for cid, meta in zip(found.get("ids") or [], found.get("metadatas") or [])
+        if not bundle or (meta or {}).get("bundle", UNNAMED_BUNDLE) == bundle
+    ]
+    if ids:
+        collection.delete(ids=ids)
+    return len(ids)
+
+
+# ---------------------------------------------------------------------------
+# Export: PolyQL data dictionaries as an OKF bundle
+# ---------------------------------------------------------------------------
+
+def _slug(name: str) -> str:
+    return re.sub(r"[^\w.-]+", "_", name).strip("_").lower() or "concept"
+
+
+def _frontmatter(meta: dict) -> str:
+    return "---\n" + yaml.safe_dump(meta, sort_keys=False, allow_unicode=True) + "---\n"
+
+
+def export_bundle(tables: dict, edges: list, unique_columns: set, terms: list,
+                  generated_at: str) -> dict:
+    """
+    Render PolyQL metadata as OKF v0.2 concept documents (pure).
+
+    tables/edges/unique_columns/terms as returned by OssieStore.read_instance().
+    Returns {relative_path: markdown}: tables/<table>.md (type Table, with
+    # Schema and # Joins linking related tables), metrics/<term>.md (type
+    Metric, formula + links to its tables) and a root index.md with
+    okf_version "0.2".
+    """
+    from MetadataManager.MetadataStore.relationdb.joinpath import join_type
+
+    files: dict = {}
+    table_path = {t.lower(): f"tables/{_slug(t)}.md" for t in tables}
+    generated = {"by": "polyql", "at": generated_at}
+
+    joins: dict = {}
+    for a, b, keys in edges:
+        joins.setdefault(a.lower(), []).append((b.lower(), keys))
+
+    for table, info in sorted(tables.items()):
+        lines = ["# Schema", "", "| Column | Type | Constraints | Description |",
+                 "|---|---|---|---|"]
+        for name, col_type, constraints, desc, *expr in info["columns"]:
+            note = f"{desc} (expression: `{expr[0]}`)" if expr and expr[0] else desc
+            lines.append(f"| {name} | {col_type} | {constraints} | {note.replace('|', '/')} |")
+        related = []
+        for other, keys in sorted(set(joins.get(table.lower(), []))):
+            if other in table_path:
+                kind = join_type(keys, table.lower(), other, unique_columns)
+                related.append(f"- [{other}](/{table_path[other]}) on `{keys}` ({kind})")
+        if related:
+            lines += ["", "# Joins", ""] + related
+        meta = {"type": "Table", "title": table, "description": (info["desc"] or "").split("\n")[0],
+                "table": table, "tags": ["polyql"], "generated": generated}
+        files[table_path[table.lower()]] = _frontmatter(meta) + "\n" + "\n".join(lines) + "\n"
+
+    metric_paths = []
+    for term in terms:
+        name = term.get("term_name")
+        if not name:
+            continue
+        deps = term.get("table_deps") or []
+        if isinstance(deps, str):
+            try:
+                deps = json.loads(deps)
+            except ValueError:
+                deps = [deps]
+        synonyms = term.get("synonyms") or []
+        if isinstance(synonyms, str):
+            try:
+                synonyms = json.loads(synonyms)
+            except ValueError:
+                synonyms = [synonyms]
+        body = []
+        if term.get("definition"):
+            body += ["# Definition", "", term["definition"], ""]
+        if term.get("formula"):
+            body += ["# Formula", "", "```sql", term["formula"], "```", ""]
+        links = [f"[{d}](/{table_path[d.lower()]})" for d in deps if d.lower() in table_path]
+        if links:
+            body += ["Uses " + ", ".join(links) + ".", ""]
+        summary = (term.get("full_name") or term.get("definition") or "").split("\n")[0]
+        meta = {"type": "Metric", "title": name, "description": summary,
+                "tags": ["polyql", "glossary"] + [str(s) for s in synonyms], "generated": generated}
+        path = f"metrics/{_slug(name)}.md"
+        metric_paths.append((name, path))
+        files[path] = _frontmatter(meta) + "\n" + "\n".join(body)
+
+    index = [_frontmatter({"okf_version": "0.2"}).rstrip(), "", "# Tables", ""]
+    index += [f"- [{t}](/{table_path[t.lower()]})" for t in sorted(tables)]
+    if metric_paths:
+        index += ["", "# Metrics", ""] + [f"- [{n}](/{p})" for n, p in metric_paths]
+    files["index.md"] = "\n".join(index) + "\n"
+    return files
