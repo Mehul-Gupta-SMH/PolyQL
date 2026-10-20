@@ -246,7 +246,7 @@ def index_term(term: dict, embedding_model, chroma_client) -> None:
         return
 
     embedding = embedding_model.encode(document).tolist()
-    chroma_id = str(uuid.uuid3(uuid.NAMESPACE_DNS, term["term_id"]))
+    chroma_id = _chroma_id(term["term_id"])
 
     data = [
         {
@@ -263,6 +263,19 @@ def index_term(term: dict, embedding_model, chroma_client) -> None:
     ]
     addData(chroma_client, data, {"collection_name": _COLLECTION, "sim_metric": "cosine"})
     logger.debug("GlossaryStore: indexed term %r into %s", term.get("term_name"), _COLLECTION)
+
+
+def _chroma_id(term_id: str) -> str:
+    return str(uuid.uuid3(uuid.NAMESPACE_DNS, term_id))
+
+
+def unindex_term(term_id: str, chroma_client) -> None:
+    """Remove a term's embedding from the 'business_glossary' collection (no-op if absent)."""
+    try:
+        collection = chroma_client.get_collection(name=_COLLECTION)
+    except Exception:
+        return  # nothing indexed yet
+    collection.delete(ids=[_chroma_id(term_id)])
 
 
 def get_business_context(

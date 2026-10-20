@@ -155,7 +155,9 @@ Balance checking (`GET /api/providers/balance`):
 | Query | `ChatInterface` + `SessionPane` + `ChatMessage` | Chat UI with left-pane history. Sessions auto-saved to localStorage (max 30). |
 | Schema / ERD | `SchemaERD` + `TableNode` | Interactive React Flow diagram; click table → side pane data dictionary |
 | Ingest Table | `IngestTable` | 2-step wizard: paste pipeline SQL → review LLM-generated data dictionary → commit |
-| Data Lineage | `DataLineage` | Select table → React Flow neighborhood graph showing connected tables |
+| Join Path | `DataLineage` | Select tables → planned join tree with cardinality and every join alternative per hop |
+| Glossary | `BusinessGlossary` | Search / add / edit / delete business terms; CSV or JSON bulk import (upsert by name); re-index embeddings |
+| Knowledge | `KnowledgePanel` | OKF bundle import / list / remove / export; Ossie import (upload or paste) and export |
 
 ---
 
@@ -430,7 +432,7 @@ CREATE TABLE business_terms (
 | SL1 | [x] | **Glossary embedding + semantic search** — Embed each term's `term_name + full_name + definition + synonyms` into a new ChromaDB collection `business_glossary`; `_get_business_context(query, instance_name)` does cosine similarity search and returns top-k matched terms with their formulas and `table_deps`; threshold-gated to avoid injecting noise | Medium | `MetadataManager/GlossaryStore.py`, `MetadataManager/MetadataStore/vdb/Chroma.py` |
 | SL2 | [x] | **Retrieval integration** — Call `_get_business_context()` in `gatherRequirements` (alongside ChromaDB table search) and in `generateQuery` / `generateQueryStream` (prepend `## Business Definitions` block to schema section); `PromptBuilder.format_schema()` renders glossary_hits list; formula string injected verbatim | Medium | `main.py`, `APIManager/PromptBuilder.py` |
 | SL3 | [x] | **Import API** — `POST /api/glossary/terms/single`, `POST /api/glossary/terms/bulk`, `GET /api/glossary/terms?instance_name=&domain=`, `GET /api/glossary/terms/{term_id}`, `PUT /api/glossary/terms/{term_id}`, `DELETE /api/glossary/terms/{term_id}`, `GET /api/glossary/search?q=` | Low | `backend/glossary.py`, `backend/app.py` |
-| SL4 | [ ] | **Glossary UI tab** — New "Glossary" tab: searchable table of all terms with inline edit; "Add Term" modal with fields for name, full name, definition, formula, domain, table dependencies (multi-select from known schema), synonyms; bulk CSV/JSON import | Medium | `frontend/src/components/BusinessGlossary.jsx`, `frontend/src/App.jsx` |
+| SL4 | [x] | **Glossary UI tab** — New "Glossary" tab: searchable table of all terms with inline edit; "Add Term" modal with fields for name, full name, definition, formula, domain, table dependencies (multi-select from known schema), synonyms; bulk CSV/JSON import | Medium | `frontend/src/components/BusinessGlossary.jsx`, `frontend/src/App.jsx` |
 | SL5 | [ ] | **Term–table linking in ERD** — Terms with `table_deps` appear as annotation nodes on the Schema/ERD tab; clicking a term node shows its definition and formula; tables linked to the term are highlighted | Medium | `frontend/src/components/SchemaERD.jsx`, `frontend/src/components/BusinessGlossary.jsx` |
 | SL6 | [x] | **Tests** — 35 CRUD tests in `test_glossary_store.py`; 19 semantic/injection tests in `test_glossary_retrieval.py`; all 247 tests pass | Low | `tests/test_glossary_store.py`, `tests/test_glossary_retrieval.py` |
 
@@ -470,7 +472,7 @@ CREATE TABLE business_terms (
 | D2 | [ ] | **Pre-commit linting hooks** — add `black`, `isort`, `flake8`, and `mypy` as pre-commit hooks for consistent style and early type errors | Low |
 | D3 | [ ] | **OpenAPI / Swagger playground** — enable FastAPI's auto-generated interactive docs at `/docs` for backend exploration without a running frontend | Low |
 | D4 | [ ] | **Contributor onboarding guide** — architecture diagram + step-by-step local setup in `CONTRIBUTING.md` | Low |
-| D5 | [ ] | **FastMCP wrapper** — publish this tool as a FastMCP server that exposes `generateQuery`, `generatePipelineDict`, and other helpers via typed tools/resources so Claude and other MCP clients can invoke them with schema validation | Medium |
+| D5 | [x] | **FastMCP wrapper** — done as `backend/mcp_server.py` (MCP SDK v2 `MCPServer`; context tools + opt-in `generate_sql`; see `docs/mcp.md`, #30). Original idea: — publish this tool as a FastMCP server that exposes `generateQuery`, `generatePipelineDict`, and other helpers via typed tools/resources so Claude and other MCP clients can invoke them with schema validation | Medium |
 
 ### Prioritization Context — Validation & Outcome Layer
 *Decided: 2026-03-15 · Branch: `Claude/feature/validation-outcome-layer` · Resolves: GitHub issue #16*
