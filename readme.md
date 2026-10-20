@@ -242,7 +242,7 @@ pip install "mcp>=2.2,<3"
 claude mcp add polyql -- python /path/to/PolyQL/backend/mcp_server.py   # Claude Code
 ```
 
-Tools: `list_instances`, `list_tables`, `search_schema`, `get_table_schema`, `find_join_path`, `get_business_terms`, `validate_sql`. All are read-only and none calls an LLM; the agent writes the SQL. Setup for Codex, HTTP, the Claude Agent SDK, the OpenAI Agents SDK and LangGraph is in [docs/mcp.md](docs/mcp.md).
+Tools: `list_instances`, `list_tables`, `search_schema`, `get_table_schema`, `find_join_path`, `get_business_terms`, `get_lineage`, `get_derivatives`, `validate_sql` (tables and qualified columns). None of these calls an LLM; the agent writes the SQL. Two tools are opt-in: `execute_sql` runs read-only `SELECT`s against a connection the operator configures, and `generate_sql` uses Poly-QL's own LLM pipeline. The HTTP transport supports bearer-token auth. Setup for Codex, HTTP, the Claude Agent SDK, the OpenAI Agents SDK and LangGraph is in [docs/mcp.md](docs/mcp.md).
 
 ---
 

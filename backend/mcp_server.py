@@ -14,17 +14,28 @@ Tools (all read-only):
   get_table_schema   — full column metadata for one table
   find_join_path     — how to join a set of tables (keys, alternatives, cardinality)
   get_business_terms — glossary definitions/formulas relevant to a question
-  validate_sql       — parse check, read-only check and unknown-table check
+  validate_sql       — parse, read-only, unknown-table and unknown-column checks
+  get_lineage        — tables connected to a table in the graph
+  get_derivatives    — pipeline sources / derived tables of a table
 
 Prompt:
   write_sql          — the recommended tool workflow for answering a question
+
+Opt-in tools:
+  execute_sql        — run one read-only SELECT; needs POLYQL_MCP_DB[_<INSTANCE>]
+  generate_sql       — PolyQL's own LLM pipeline; needs --enable-generate
+
+Resources: polyql://tables/{instance}, polyql://schema/{instance}/{table},
+polyql://glossary/{term}
 
 Run:
   python -m backend.mcp_server                       # stdio (Claude Code, Codex)
   python -m backend.mcp_server --transport streamable-http --port 8765
 
-The streamable-http transport has no authentication; it binds to 127.0.0.1
-by default. Do not expose it beyond localhost without putting auth in front.
+streamable-http binds to 127.0.0.1 by default. Set POLYQL_MCP_TOKEN (and/or
+JWT_SECRET to accept PolyQL login tokens) to require `Authorization: Bearer`;
+on any other host the server refuses to start without auth unless
+--insecure-no-auth is given.
 
 Heavy dependencies (embedding model, reranker, ChromaDB) load lazily on the
 first search_schema / get_business_terms call, so the server starts fast.
@@ -50,7 +61,8 @@ _MAX_OUTPUT_CHARS = 30_000
 _INSTRUCTIONS = """\
 PolyQL holds schema metadata, join paths, business definitions and curated
 knowledge notes for one or more databases ("instances"). Use it to write
-correct SQL yourself; PolyQL does not run queries.
+correct SQL yourself. If execute_sql is configured you can run read-only
+SELECTs to check results.
 
 Recommended workflow for a data question:
 1. list_instances (if you don't know the instance name).
@@ -100,6 +112,25 @@ def _known_tables(instance: str) -> dict | None:
         logger.warning("MCP: table metadata unavailable — %s", exc)
         return None
     return {row[0]: (row[1] or "") for row in rows if row and row[0]}
+
+
+def _known_columns(instance: str) -> dict | None:
+    """
+    {table_name_lower: {column_lower, ...}} for *instance*; None when the
+    metadata store can't be read.
+    """
+    try:
+        db, tmddb = _metadata_db()
+        inst_filter = {} if instance == "default" else {"instance_name": instance}
+        rows = db.get_data(tmddb["tableColName"], inst_filter, ["TableName", "ColumnName"], fetchtype="All") or []
+    except Exception as exc:
+        logger.warning("MCP: column metadata unavailable — %s", exc)
+        return None
+    columns: dict = {}
+    for table, column in rows:
+        if table and column:
+            columns.setdefault(table.lower(), set()).add(column.lower())
+    return columns
 
 
 # ---------------------------------------------------------------------------
@@ -231,10 +262,70 @@ def get_business_terms(question: str, instance: str = "default") -> str:
     return _cap("\n".join(PromptBuilder.format_business_definitions(hits)).rstrip())
 
 
+@mcp.tool()
+def get_lineage(table: str, instance: str = "default") -> str:
+    """
+    Show the tables connected to a table in PolyQL's graph (its connected
+    component), with the join keys between them. Use it to see where a table
+    sits among its neighbours before choosing joins.
+    """
+    from fastapi import HTTPException
+
+    from backend.app import get_lineage as _lineage
+
+    try:
+        data = _lineage(table, instance_name=instance)
+    except HTTPException as exc:
+        return str(exc.detail)
+    lines = [f"## Lineage of {data['center']}"]
+    related = [n["id"] for n in data["nodes"] if n["role"] != "center"]
+    lines.append(f"Connected tables: {', '.join(related) if related else '(none)'}")
+    if data["edges"]:
+        lines.append("")
+        for edge in data["edges"]:
+            keys = edge.get("joinKeys") or "(no join keys recorded)"
+            lines.append(f"- {edge['source']} — {edge['target']} [{edge['joinType']}] ON {keys}")
+    return _cap("\n".join(lines))
+
+
+@mcp.tool()
+def get_derivatives(table: str, instance: str = "default") -> str:
+    """
+    Show pipeline lineage for a table: which derived tables are built from it
+    and, if it is itself derived, which source tables it comes from. Prefer
+    querying the source tables when a derived table's definition is unclear.
+    """
+    from backend.app import get_derivatives as _derivatives
+
+    try:
+        data = _derivatives(table, instance_name=instance)
+    except Exception as exc:
+        logger.warning("MCP: derivatives lookup failed for %r — %s", table, exc)
+        return _NO_METADATA
+
+    def _fmt(items):
+        return "\n".join(f"- **{t['name']}**: {t['description']}" for t in items) or "(none)"
+
+    kind = "derived (built by a pipeline)" if data["is_derived"] else "a source table"
+    return _cap(
+        f"## {data['table']} is {kind}\n\n"
+        f"### Built from\n{_fmt(data['parent_tables'])}\n\n"
+        f"### Tables derived from it\n{_fmt(data['derived_tables'])}"
+    )
+
+
+_IDENT = r"[`\"\[]?[\w$]+[`\"\]]?"
 _TABLE_REF_RE = re.compile(
-    r"\b(?:FROM|JOIN)\s+((?:[`\"\[]?[\w$]+[`\"\]]?\.){0,2}[`\"\[]?[\w$]+[`\"\]]?)",
+    rf"\b(?:FROM|JOIN)\s+((?:{_IDENT}\.){{0,2}}{_IDENT})(?:\s+(?:AS\s+)?({_IDENT}))?",
     re.IGNORECASE,
 )
+# Words that can follow a table reference but are not an alias
+_NOT_ALIAS = {
+    "on", "using", "where", "join", "inner", "left", "right", "full", "outer", "cross",
+    "natural", "group", "order", "having", "limit", "offset", "union", "intersect",
+    "except", "window", "qualify", "fetch", "for", "lateral", "tablesample", "with",
+}
+_COLUMN_REF_RE = re.compile(r"\b([\w$]+)\.([\w$]+|\*)(?!\s*\()")
 _READ_ONLY_TYPES = {"SELECT"}
 # Removed before looking for table references: comments, string literals, and
 # functions whose arguments use FROM (EXTRACT(YEAR FROM d), SUBSTRING(s FROM 2), ...)
@@ -246,21 +337,45 @@ _STRIP_RES = [
 ]
 
 
+def _unquote(name: str) -> str:
+    return re.sub(r"[`\"\[\]]", "", name).lower()
+
+
 def _table_refs(sql: str) -> tuple:
     """
-    Table names after FROM / JOIN (heuristic; quotes removed, lowercased).
+    Parse FROM / JOIN clauses (heuristic).
 
-    Returns (refs, cleaned_sql) — the SQL with comments, literals and FROM-using
-    functions removed, so CTE detection runs on the same text.
+    Returns (refs, aliases, cleaned_sql, column_sql):
+      refs        table names in order of appearance (quotes removed, lowercased)
+      aliases     {alias_or_short_name: table_name}
+      cleaned_sql the SQL with comments, literals and FROM-using functions removed
+      column_sql  cleaned_sql with the table references blanked out, so that
+                  schema.table isn't mistaken for alias.column
     """
     for pattern in _STRIP_RES:
         sql = pattern.sub(" ", sql)
-    refs = []
-    for ref in _TABLE_REF_RE.findall(sql):
-        name = re.sub(r"[`\"\[\]]", "", ref).lower()
+    refs, aliases = [], {}
+    for match in _TABLE_REF_RE.finditer(sql):
+        name = _unquote(match.group(1))
         if name not in refs:
             refs.append(name)
-    return refs, sql
+        aliases.setdefault(name.rsplit(".", 1)[-1], name)
+        alias = _unquote(match.group(2) or "")
+        if alias and alias not in _NOT_ALIAS:
+            aliases[alias] = name
+    column_sql = _TABLE_REF_RE.sub(" ", sql)
+    column_sql = re.sub(r"[`\"\[\]]", "", column_sql)
+    return refs, aliases, sql, column_sql
+
+
+_INTO_RE = re.compile(r"\bINTO\b", re.IGNORECASE)
+
+
+def _writes_via_into(sql: str) -> bool:
+    """SELECT … INTO (PostgreSQL new table, MySQL OUTFILE/DUMPFILE) writes despite being a SELECT."""
+    for pattern in _STRIP_RES:
+        sql = pattern.sub(" ", sql)
+    return bool(_INTO_RE.search(sql))
 
 
 class SQLCheck(TypedDict):
@@ -268,6 +383,7 @@ class SQLCheck(TypedDict):
     read_only: bool
     statement_types: list[str]
     unknown_tables: list[str]
+    unknown_columns: list[str]
     errors: list[str]
     warnings: list[str]
 
@@ -278,9 +394,12 @@ def validate_sql(sql: str, instance: str = "default") -> SQLCheck:
     Check SQL before you return it.
 
     Reports whether it parses, whether every statement is read-only
-    (SELECT / WITH … SELECT), and any FROM/JOIN table that PolyQL doesn't know
-    (CTE names are ignored). Does not run the query or check columns.
-    Returns {valid, read_only, statement_types, unknown_tables, errors, warnings}.
+    (SELECT / WITH … SELECT), any FROM/JOIN table that PolyQL doesn't know
+    (CTE names are ignored), and any qualified column (alias.column or
+    table.column) that doesn't exist on its table. Unqualified columns are not
+    checked, so qualify columns to get them checked. Does not run the query.
+    Returns {valid, read_only, statement_types, unknown_tables,
+    unknown_columns, errors, warnings}.
     """
     import sqlparse
 
@@ -288,16 +407,20 @@ def validate_sql(sql: str, instance: str = "default") -> SQLCheck:
     statements = [s for s in sqlparse.parse(sql or "") if str(s).strip()]
     if not statements:
         return {"valid": False, "read_only": False, "statement_types": [],
-                "unknown_tables": [], "errors": ["No SQL statement found."], "warnings": []}
+                "unknown_tables": [], "unknown_columns": [], "errors": ["No SQL statement found."],
+                "warnings": []}
 
     types = [s.get_type() for s in statements]
-    read_only = all(t in _READ_ONLY_TYPES for t in types)
+    into = _writes_via_into(sql)
+    read_only = all(t in _READ_ONLY_TYPES for t in types) and not into
     if "UNKNOWN" in types:
         errors.append("Could not recognise the statement type; check the syntax.")
-    if not read_only:
+    if not all(t in _READ_ONLY_TYPES for t in types):
         errors.append(f"Not read-only: {', '.join(t for t in types if t not in _READ_ONLY_TYPES)}.")
+    if into:
+        errors.append("Not read-only: SELECT … INTO writes a table or file.")
 
-    refs, cleaned = _table_refs(sql)
+    refs, aliases, cleaned, column_sql = _table_refs(sql)
     ctes = {
         m.lower()
         for m in re.findall(r"(?:\bWITH(?:\s+RECURSIVE)?|,)\s+([\w$]+)\s+AS\s*\(", cleaned, re.IGNORECASE)
@@ -316,14 +439,243 @@ def validate_sql(sql: str, instance: str = "default") -> SQLCheck:
     if unknown:
         errors.append(f"Unknown tables: {', '.join(unknown)}.")
 
+    unknown_columns = []
+    known_columns = _known_columns(instance) if known_tables is not None else None
+    if known_columns is None:
+        if known_tables is not None:
+            warnings.append("Column metadata unavailable — column check skipped.")
+    else:
+        by_short = {t.rsplit(".", 1)[-1]: t for t in known_columns}
+        for qualifier, column in _COLUMN_REF_RE.findall(column_sql):
+            qualifier, column = qualifier.lower(), column.lower()
+            if column == "*" or qualifier in ctes:
+                continue
+            table = aliases.get(qualifier)
+            if table is None or table in ctes:
+                continue  # subquery alias or something we can't resolve
+            columns = known_columns.get(table) or known_columns.get(by_short.get(table.rsplit(".", 1)[-1], ""))
+            if not columns:
+                continue  # no column metadata for this table
+            ref = f"{qualifier}.{column}"
+            if column not in columns and ref not in unknown_columns:
+                unknown_columns.append(ref)
+    if unknown_columns:
+        errors.append(f"Unknown columns: {', '.join(unknown_columns)}.")
+
     return {
         "valid": not errors,
         "read_only": read_only,
         "statement_types": types,
         "unknown_tables": unknown,
+        "unknown_columns": unknown_columns,
         "errors": errors,
         "warnings": warnings,
     }
+
+
+# ---------------------------------------------------------------------------
+# Execution (opt-in: needs a server-side connection string)
+# ---------------------------------------------------------------------------
+
+_DB_ENV_PREFIX = "POLYQL_MCP_DB"
+_DEFAULT_MAX_ROWS = 100
+
+
+def _env_number(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def _connection_string(instance: str) -> str | None:
+    """
+    Connection string for *instance* from the environment — never from tool
+    arguments, so agents can't point the server at arbitrary databases:
+      POLYQL_MCP_DB_<INSTANCE>  (instance upper-cased, non-alphanumerics → _)
+      POLYQL_MCP_DB             fallback for 'default' / any instance
+    """
+    key = f"{_DB_ENV_PREFIX}_{re.sub(r'[^A-Za-z0-9]', '_', instance).upper()}"
+    return os.environ.get(key) or os.environ.get(_DB_ENV_PREFIX) or None
+
+
+def _redact(message: str, connection_string: str) -> str:
+    """Remove the connection string and any URL password from an error message."""
+    message = message.replace(connection_string, "<connection>")
+    return re.sub(r"(://[^:/@\s]+:)[^@\s]+@", r"\1***@", message)
+
+
+class QueryResult(TypedDict):
+    columns: list[str]
+    rows: list[list]
+    row_count: int
+    truncated: bool
+    latency_ms: float
+    enforced: list[str]
+    error: str
+
+
+@mcp.tool()
+def execute_sql(sql: str, instance: str = "default", max_rows: int = _DEFAULT_MAX_ROWS,
+                question: str = "") -> QueryResult:
+    """
+    Run ONE read-only SELECT against the instance's database and return rows.
+
+    Only works when the server operator has configured a connection
+    (POLYQL_MCP_DB_<INSTANCE> or POLYQL_MCP_DB). Rejected before execution:
+    anything that isn't a single SELECT / WITH … SELECT. The transaction is
+    always rolled back, rows are capped (max_rows, server limit
+    POLYQL_MCP_MAX_ROWS, default 1000) and a statement timeout applies where
+    the database supports it (POLYQL_MCP_TIMEOUT_S, default 30).
+    Pass the user's question to have the outcome recorded with it.
+    Returns {columns, rows, row_count, truncated, latency_ms, enforced, error};
+    error is "" on success.
+    """
+    import time
+
+    def fail(message: str) -> QueryResult:
+        return {"columns": [], "rows": [], "row_count": 0, "truncated": False,
+                "latency_ms": 0.0, "enforced": [], "error": message}
+
+    connection = _connection_string(instance)
+    if not connection:
+        return fail(
+            "Execution is not configured for this server. The operator can enable it by "
+            f"setting {_DB_ENV_PREFIX}_<INSTANCE> or {_DB_ENV_PREFIX} to a read-only connection string."
+        )
+
+    import sqlparse
+
+    statements = [s for s in sqlparse.parse(sql or "") if str(s).strip()]
+    if len(statements) != 1:
+        return fail("Pass exactly one SQL statement.")
+    if statements[0].get_type() not in _READ_ONLY_TYPES:
+        return fail(f"Only SELECT queries can be executed (got {statements[0].get_type()}).")
+    if _writes_via_into(sql):
+        return fail("SELECT … INTO is not allowed: it writes a table or file.")
+
+    from backend.executor import execute_read_only
+    from validation.outcome_store import record as record_outcome
+
+    limit = int(_env_number("POLYQL_MCP_MAX_ROWS", 1000))
+    max_rows = max(1, min(int(max_rows), limit))
+    timeout_s = _env_number("POLYQL_MCP_TIMEOUT_S", 30)
+    context = {"generated_sql": sql, "query_type": "sql", "nl_query": question, "provider": "mcp"}
+
+    t0 = time.monotonic()
+    try:
+        columns, rows, truncated, enforced = execute_read_only(sql, connection, max_rows, timeout_s)
+    except Exception as exc:
+        latency_ms = (time.monotonic() - t0) * 1000
+        message = _redact(f"{type(exc).__name__}: {exc}", connection)
+        _safe_record(record_outcome, outcome="failure", latency_ms=latency_ms,
+                     error_type=type(exc).__name__, error_msg=message, **context)
+        result = fail(message)
+        result["latency_ms"] = round(latency_ms, 1)
+        return result
+
+    latency_ms = (time.monotonic() - t0) * 1000
+    _safe_record(record_outcome, outcome="success" if rows else "empty",
+                 latency_ms=latency_ms, row_count=len(rows), **context)
+    return {"columns": columns, "rows": rows, "row_count": len(rows), "truncated": truncated,
+            "latency_ms": round(latency_ms, 1), "enforced": enforced, "error": ""}
+
+
+def _safe_record(record, **fields) -> None:
+    """Outcome recording must never break a query result."""
+    try:
+        record(**fields)
+    except Exception as exc:
+        logger.warning("MCP: could not record query outcome — %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Generate mode (opt-in: --enable-generate)
+# ---------------------------------------------------------------------------
+
+class GeneratedQuery(TypedDict):
+    type: str      # "sql" | "code" | "clarify"
+    content: str   # the query/code, or the clarifying question
+    error: str
+
+
+def generate_sql(question: str, provider: str, instance: str = "default",
+                 query_type: str = "sql", model: str = "") -> GeneratedQuery:
+    """
+    Generate the query with PolyQL's own LLM pipeline instead of writing it
+    yourself. Calls the configured provider (costs tokens) and uses its API key
+    from PolyQL's config. Prefer search_schema + writing SQL yourself; use this
+    for clients without a capable model or to compare against PolyQL's output.
+
+    provider: open_ai | anthropic | google | groq | codex | claude_code
+    query_type: sql | spark_sql | dataframe_api | pandas
+    Returns {type, content, error}: type "clarify" means PolyQL needs more
+    detail — content is its question.
+    """
+    from main import generateQuery
+
+    if provider == "claude_code":
+        logger.warning("MCP generate_sql: provider claude_code starts a nested Claude Code session")
+    try:
+        result = generateQuery(question, provider, query_type, model=model or None, instance_name=instance)
+    except Exception as exc:
+        return {"type": "error", "content": "", "error": f"{type(exc).__name__}: {exc}"}
+    return {"type": result["type"], "content": result["content"], "error": ""}
+
+
+_generate_enabled = False
+
+
+def enable_generate() -> None:
+    """Register generate_sql (generate mode). Off by default: it calls an LLM."""
+    global _generate_enabled
+    if not _generate_enabled:
+        mcp.add_tool(generate_sql)
+        _generate_enabled = True
+
+
+# ---------------------------------------------------------------------------
+# Resources (read-only views a client can attach as context)
+# ---------------------------------------------------------------------------
+
+@mcp.resource(
+    "polyql://tables/{instance}",
+    name="tables",
+    description="Every table in an instance with its description ('default' = all instances).",
+    mime_type="text/markdown",
+)
+def tables_resource(instance: str) -> str:
+    return list_tables(instance)
+
+
+@mcp.resource(
+    "polyql://schema/{instance}/{table}",
+    name="table-schema",
+    description="Full column metadata for one table.",
+    mime_type="text/markdown",
+)
+def schema_resource(instance: str, table: str) -> str:
+    return get_table_schema(table, instance)
+
+
+@mcp.resource(
+    "polyql://glossary/{term}",
+    name="glossary-term",
+    description="One business glossary term: definition, canonical formula and table dependencies.",
+    mime_type="text/markdown",
+)
+def glossary_resource(term: str) -> str:
+    from APIManager.PromptBuilder import PromptBuilder
+    from MetadataManager.GlossaryStore import get_term_by_name
+
+    try:
+        hit = get_term_by_name(term)
+    except Exception as exc:
+        logger.warning("MCP: glossary lookup failed for %r — %s", term, exc)
+        hit = None
+    if not hit:
+        return f"No glossary term named {term!r}. Use get_business_terms to search."
+    return "\n".join(PromptBuilder.format_business_definitions([hit])).rstrip()
 
 
 # ---------------------------------------------------------------------------
@@ -340,9 +692,70 @@ def write_sql(question: str, instance: str = "default", dialect: str = "ANSI SQL
         "2. If a table or join is missing, call get_table_schema or find_join_path.\n"
         "3. Use Business Definitions formulas exactly; follow Knowledge Notes where they apply.\n"
         "4. Use only tables and columns PolyQL returned. Watch n:m joins for double counting.\n"
-        "5. Call validate_sql and fix every error it reports.\n"
+        "5. Call validate_sql and fix every error it reports (qualify columns so they get checked).\n"
+        "6. If execute_sql is configured, run the query and sanity-check the result.\n"
         "Return the final SQL and a one-line explanation of the tables and joins used."
     )
+
+
+# ---------------------------------------------------------------------------
+# HTTP authentication
+# ---------------------------------------------------------------------------
+
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _token_checks() -> list:
+    """
+    Bearer-token checks enabled by the environment:
+      POLYQL_MCP_TOKEN — a shared secret clients send as `Authorization: Bearer <token>`
+      JWT_SECRET       — also accept PolyQL login JWTs (the web app must use the same secret)
+    """
+    import hmac
+
+    checks = []
+    static = os.environ.get("POLYQL_MCP_TOKEN")
+    if static:
+        checks.append(lambda token: hmac.compare_digest(token.encode(), static.encode()))
+    if os.environ.get("JWT_SECRET"):
+        def _jwt_ok(token: str) -> bool:
+            from backend.auth import _decode_token
+            try:
+                _decode_token(token)
+                return True
+            except Exception:
+                return False
+        checks.append(_jwt_ok)
+    return checks
+
+
+class BearerAuth:
+    """ASGI middleware: reject HTTP requests without a valid bearer token."""
+
+    def __init__(self, app, checks: list):
+        self.app = app
+        self.checks = checks
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        header = dict(scope.get("headers") or []).get(b"authorization", b"").decode("latin-1")
+        scheme, _, token = header.partition(" ")
+        if scheme.lower() == "bearer" and token and any(check(token.strip()) for check in self.checks):
+            return await self.app(scope, receive, send)
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [(b"content-type", b"application/json"),
+                        (b"www-authenticate", b'Bearer realm="polyql-mcp"')],
+        })
+        await send({"type": "http.response.body", "body": b'{"error": "unauthorized"}'})
+
+
+def http_app(host: str, checks: list):
+    """The streamable-http ASGI app, wrapped in BearerAuth when checks are configured."""
+    app = mcp.streamable_http_app(host=host)
+    return BearerAuth(app, checks) if checks else app
 
 
 # ---------------------------------------------------------------------------
@@ -354,17 +767,34 @@ def main(argv: list | None = None) -> None:
     parser.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
     parser.add_argument("--host", default="127.0.0.1", help="streamable-http only (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8765, help="streamable-http only (default: 8765)")
+    parser.add_argument("--enable-generate", action="store_true",
+                        help="also expose generate_sql, which calls PolyQL's own LLM pipeline (costs tokens)")
+    parser.add_argument("--insecure-no-auth", action="store_true",
+                        help="allow streamable-http on a non-local host without authentication")
     args = parser.parse_args(argv)
 
     # Logs go to stderr; in stdio mode stdout carries the protocol
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 
+    if args.enable_generate or os.environ.get("POLYQL_MCP_ENABLE_GENERATE") == "1":
+        enable_generate()
+
     if args.transport == "stdio":
         mcp.run("stdio")
-    else:
-        if args.host not in ("127.0.0.1", "localhost", "::1"):
-            logger.warning("Serving PolyQL MCP on %s without authentication", args.host)
-        mcp.run("streamable-http", host=args.host, port=args.port)
+        return
+
+    checks = _token_checks()
+    if not checks:
+        if args.host not in _LOCAL_HOSTS and not args.insecure_no_auth:
+            parser.error(
+                f"refusing to serve on {args.host} without authentication: set POLYQL_MCP_TOKEN "
+                "(and/or JWT_SECRET), or pass --insecure-no-auth"
+            )
+        logger.warning("PolyQL MCP over HTTP has no authentication (set POLYQL_MCP_TOKEN to require a token)")
+
+    import uvicorn
+
+    uvicorn.run(http_app(args.host, checks), host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":
