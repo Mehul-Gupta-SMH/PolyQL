@@ -13,6 +13,8 @@ function renderQueryInput(overrides = {}) {
     loading: false,
     error: '',
     onSubmit: vi.fn(),
+    queryType: 'sql',
+    setQueryType: vi.fn(),
     ...overrides,
   }
   return { ...render(<QueryInput {...props} />), props }
@@ -24,9 +26,12 @@ describe('QueryInput', () => {
     expect(screen.getByRole('textbox')).toBeInTheDocument()
   })
 
-  it('renders a provider select', () => {
+  it('renders a provider select and a query-type select', () => {
     renderQueryInput()
-    expect(screen.getByRole('combobox')).toBeInTheDocument()
+    const [providerSelect, typeSelect] = screen.getAllByRole('combobox')
+    expect(screen.getAllByRole('combobox')).toHaveLength(2)
+    expect(Array.from(providerSelect.options).map((o) => o.value)).toEqual(['open_ai', 'anthropic'])
+    expect(Array.from(typeSelect.options).map((o) => o.value)).toEqual(['sql', 'spark_sql', 'dataframe_api'])
   })
 
   it('renders a submit button', () => {
@@ -48,8 +53,25 @@ describe('QueryInput', () => {
 
   it('calls setProvider when the select changes', () => {
     const { props } = renderQueryInput()
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'anthropic' } })
+    const [providerSelect] = screen.getAllByRole('combobox')
+    fireEvent.change(providerSelect, { target: { value: 'anthropic' } })
     expect(props.setProvider).toHaveBeenCalledWith('anthropic')
+  })
+
+  it('calls setQueryType when the query-type select changes', () => {
+    const { props } = renderQueryInput()
+    const typeSelect = screen.getAllByRole('combobox')[1]
+    fireEvent.change(typeSelect, { target: { value: 'spark_sql' } })
+    expect(props.setQueryType).toHaveBeenCalledWith('spark_sql')
+  })
+
+  it.each([
+    ['sql', 'Generate SQL'],
+    ['spark_sql', 'Generate Spark SQL'],
+    ['dataframe_api', 'Generate DataFrame Code'],
+  ])('labels the submit button for queryType %s', (queryType, label) => {
+    renderQueryInput({ queryType })
+    expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
   })
 
   it('disables textarea and button when loading is true', () => {

@@ -282,6 +282,12 @@ export default function ChatInterface({ providers }) {
         }),
       })
 
+      if (res.status === 401) {
+        localStorage.removeItem('poly_ql_token')
+        window.dispatchEvent(new Event('auth:logout'))
+        return
+      }
+
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}))
         setMessages((prev) => prev.map((m) =>
@@ -289,12 +295,6 @@ export default function ChatInterface({ providers }) {
             ? { ...m, type: 'error', content: errData.detail ?? 'An error occurred.', retryQuery: retryLabel }
             : m
         ))
-        return
-      }
-
-      if (res.status === 401) {
-        localStorage.removeItem('poly_ql_token')
-        window.dispatchEvent(new Event('auth:logout'))
         return
       }
 
