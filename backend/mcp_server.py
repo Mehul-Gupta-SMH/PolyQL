@@ -213,33 +213,36 @@ def find_join_path(tables: list[str], instance: str = "default") -> str:
     """
     Explain how to join a set of tables, using PolyQL's join graph.
 
-    Lists each hop with its join condition and cardinality (1:1, 1:n, n:1, n:m).
-    When two tables can be joined more than one way (e.g. order_date vs
-    ship_date → dim_date), every alternative is listed: pick the one the
-    question needs. Tables that can't be connected are reported.
+    Connects all the tables with one minimal set of joins, preferring key-to-key
+    hops over many-to-many. Each hop shows its join condition and cardinality
+    (1:1, 1:n, n:1, n:m); 1:n and n:m hops multiply rows, so aggregate before
+    joining or use COUNT(DISTINCT …). When two tables can be joined more than
+    one way (e.g. order_date vs ship_date → dim_date), every alternative is
+    listed: pick the one the question needs. Pipeline lineage edges are not
+    used. Tables that can't be connected are reported.
     """
     from MetadataManager.MetadataStore.relationdb import kuzuDB
-
-    from backend.app import _determine_join_type
+    from MetadataManager.MetadataStore.relationdb.joinpath import connect_tables, load_unique_columns
 
     if len(tables) < 2:
         return "Pass at least two tables."
 
     graph = kuzuDB.getObj(instance)
-    names = [t.lower() for t in tables]
+    names = list(dict.fromkeys(t.lower() for t in tables))
     unknown = [t for t in names if t not in graph]
-    relations = kuzuDB.getRelations(graph, [t for t in names if t in graph])
+    relations, unreached = connect_tables(graph, [t for t in names if t in graph],
+                                          load_unique_columns(instance))
 
     lines = []
     if relations:
         lines.append("## Join path")
         for rel in relations:
-            keys = (rel.get("edge_attributes") or {}).get("JoinKeys", "") or "(no join keys recorded)"
-            kind = _determine_join_type(keys, rel["source"], rel["target"])
-            lines.append(f"- {rel['source']} → {rel['target']} [{kind}] ON {keys}")
-
-    connected = {r["source"] for r in relations} | {r["target"] for r in relations}
-    unreached = [t for t in names if t in graph and t not in connected]
+            lines.append(f"- {rel['source']} → {rel['target']} [{rel['cardinality']}] ON {rel['join_keys']}")
+            for alt in rel["alternatives"][1:]:
+                lines.append(f"    - or ON {alt}")
+        fan_out = [f"{r['source']} → {r['target']}" for r in relations if r["cardinality"] in ("1:n", "n:m")]
+        if fan_out:
+            lines.append(f"\nRow multiplication: {', '.join(fan_out)}. Aggregate before joining or use COUNT(DISTINCT …).")
     if unreached:
         lines.append(f"\nNo join path found to: {', '.join(unreached)}")
     if unknown:

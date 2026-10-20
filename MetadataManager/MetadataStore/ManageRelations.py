@@ -47,18 +47,22 @@ class Relations:
         iname = instance_name if instance_name is not None else self.instance_name
         self._backend.addRelations(self.GraphObj, edges, iname)
 
-    def getRelation(self, target_nodes=[], instance_name: str = None):
+    def getRelation(self, target_nodes=[], instance_name: str = None, unique_columns: set = None):
         """
         Retrieve relations from the graph object.
 
         args:
             - target_nodes (list): List of target nodes to retrieve relations for.
             - instance_name (str): Ignored (instance already set at construction). Kept for API symmetry.
+            - unique_columns (set): {(table, column)} PRIMARY KEY / UNIQUE columns, used to
+              rank joins by cardinality (kuzu backend only).
 
         returns:
             - dict: Dictionary containing retrieved relations.
         """
         self.__instGraphObj__()
+        if unique_columns is not None and self.strgType == "kuzu":
+            return self._backend.getRelations(self.GraphObj, target_nodes, unique_columns=unique_columns)
         return self._backend.getRelations(self.GraphObj, target_nodes)
 
     def visRelations(self):

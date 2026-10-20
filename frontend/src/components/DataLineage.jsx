@@ -75,8 +75,9 @@ function buildFlow(pathData, fromTable, toTable, joinTypeFilter = 'all') {
     .map((e, i) => {
     const jt = (e.joinType || 'n:m').toLowerCase()
     const color = joinTypeColors[jt] ?? '#94a3b8'
+    const extra = (e.alternatives?.length ?? 0) > 1 ? ` (+${e.alternatives.length - 1} alt)` : ''
     const label = e.joinKeys
-      ? `${jt.toUpperCase()} · ${e.joinKeys.length > 50 ? e.joinKeys.slice(0, 47) + '…' : e.joinKeys}`
+      ? `${jt.toUpperCase()} · ${e.joinKeys.length > 50 ? e.joinKeys.slice(0, 47) + '…' : e.joinKeys}${extra}`
       : jt.toUpperCase()
     return {
       id: `e-${i}`,
@@ -102,6 +103,41 @@ function buildFlow(pathData, fromTable, toTable, joinTypeFilter = 'all') {
     }),
     edges: rfEdges,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Join conditions list (every alternative per hop + row-multiplication hint)
+// ---------------------------------------------------------------------------
+function JoinConditions({ edges }) {
+  if (!edges?.length) return null
+  const fansOut = edges.some((e) => ['1:n', 'n:m'].includes((e.joinType || '').toLowerCase()))
+  return (
+    <div style={{ marginTop: 12, fontSize: 13, color: '#374151' }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>Join conditions</div>
+      <ol style={{ margin: 0, paddingLeft: 20 }}>
+        {edges.map((e, i) => {
+          const options = e.alternatives?.length ? e.alternatives : [e.joinKeys]
+          return (
+            <li key={i} style={{ marginBottom: 6 }}>
+              <strong>{e.source} → {e.target}</strong>{' '}
+              <span style={{ color: '#6b7280' }}>[{(e.joinType || 'n:m').toUpperCase()}]</span>
+              {options.length > 1 && (
+                <span style={{ color: '#92400e' }}> — {options.length} ways to join; pick the one the question needs</span>
+              )}
+              <ul style={{ margin: '2px 0 0', paddingLeft: 18 }}>
+                {options.map((opt) => <li key={opt}><code>{opt}</code></li>)}
+              </ul>
+            </li>
+          )
+        })}
+      </ol>
+      {fansOut && (
+        <div style={{ marginTop: 6, color: '#92400e' }}>
+          1:N and N:M joins repeat rows — aggregate before joining or use COUNT(DISTINCT …).
+        </div>
+      )}
+    </div>
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +237,7 @@ export default function DataLineage({ tables }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [noPath, setNoPath] = useState(false)
+  const [pathEdges, setPathEdges] = useState([])
   const [derivativeTable, setDerivativeTable] = useState('')
   const [activeTab, setActiveTab] = useState('joinpath')
 
@@ -218,6 +255,7 @@ export default function DataLineage({ tables }) {
     setNoPath(false)
     setNodes([])
     setEdges([])
+    setPathEdges([])
     try {
       const res = await fetch(
         `/api/joinpath?from_table=${encodeURIComponent(fromTable)}&to_table=${encodeURIComponent(toTable)}&instance_name=${encodeURIComponent(instance)}`
@@ -229,6 +267,7 @@ export default function DataLineage({ tables }) {
       const { nodes: n, edges: e } = buildFlow(data, fromTable, toTable)
       setNodes(n)
       setEdges(e)
+      setPathEdges(data.edges ?? [])
     } catch {
       setError('Network error — is the backend running?')
     } finally {
@@ -242,6 +281,7 @@ export default function DataLineage({ tables }) {
     setToTable('')
     setNodes([])
     setEdges([])
+    setPathEdges([])
     setNoPath(false)
     setError('')
     setDerivativeTable('')
@@ -355,6 +395,7 @@ export default function DataLineage({ tables }) {
                   <Legend />
                 </ReactFlow>
               </div>
+              <JoinConditions edges={pathEdges} />
             </>
           )}
 

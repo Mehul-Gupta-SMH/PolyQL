@@ -221,8 +221,14 @@ class SQLBuilderSupport:
         # Initializing a Relations object for managing table relations
         RelationsObj = ManageRelations.Relations(strgType="kuzu", instance_name=self.instance_name)
 
-        # Retrieving table relations and associated join keys
-        self.join_keys = RelationsObj.getRelation(list(self.table_list["direct"].keys()))
+        # Retrieving table relations and associated join keys; key columns let the
+        # planner prefer key-to-key joins and label each hop's cardinality
+        from MetadataManager.MetadataStore.relationdb.joinpath import load_unique_columns
+
+        self.join_keys = RelationsObj.getRelation(
+            list(self.table_list["direct"].keys()),
+            unique_columns=load_unique_columns(self.instance_name),
+        )
 
         # Updating the 'intermediate' table list attribute with tables not in the 'direct' table list
         for tables in self.join_keys:

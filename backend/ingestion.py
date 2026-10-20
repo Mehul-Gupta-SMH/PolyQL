@@ -255,7 +255,7 @@ def store_table(
     table_name: str,
     table_desc: str,
     columns: list,        # [{name, type, constraints, desc}]
-    relationships: list,  # [{source, target, join_keys}]
+    relationships: list,  # [{source, target, join_keys, kind?}]; kind is fk (default) or lineage
     instance_name: str = "default",
     db_type: str = "generic",
 ) -> None:
@@ -327,7 +327,7 @@ def store_table(
     if relationships:
         rel_mgr = Relations(instance_name=instance_name)
         edges = [
-            [r["source"].lower(), r["target"].lower(), r.get("join_keys", "")]
+            [r["source"].lower(), r["target"].lower(), r.get("join_keys", ""), r.get("kind") or "fk"]
             for r in relationships
         ]
         rel_mgr.addRelation(edges)

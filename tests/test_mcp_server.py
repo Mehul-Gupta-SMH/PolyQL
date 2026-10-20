@@ -181,37 +181,117 @@ class TestSchemaContext:
 # Join paths
 # ---------------------------------------------------------------------------
 
+def _join_graph():
+    import networkx as nx
+
+    G = nx.DiGraph()
+
+    def edge(a, b, keys, kind="fk", alternatives=None):
+        for src, tgt in ((a, b), (b, a)):
+            G.add_edge(src, tgt, JoinKeys=keys, Kind=kind)
+            if alternatives:
+                G[src][tgt]["JoinKeysAlternatives"] = alternatives
+
+    edge("orders", "customers", "orders.customer_id = customers.id")
+    edge("orders", "dim_date", "orders.order_date_id = dim_date.id",
+         alternatives=["orders.order_date_id = dim_date.id", "orders.ship_date_id = dim_date.id"])
+    edge("orders", "daily_sales", "", kind="lineage")
+    G.add_node("audit_log")
+    return G
+
+
+KEYS = {("customers", "id"), ("dim_date", "id")}
+
+
 class TestFindJoinPath:
-    def _graph(self, nodes):
-        graph = MagicMock()
-        graph.__contains__.side_effect = lambda n: n in nodes
-        return graph
+    def run(self, tables):
+        with patch("MetadataManager.MetadataStore.relationdb.kuzuDB.getObj", return_value=_join_graph()), \
+             patch("MetadataManager.MetadataStore.relationdb.joinpath.load_unique_columns", return_value=KEYS):
+            return text(call("find_join_path", {"tables": tables}))
 
     def test_lists_hops_with_cardinality_and_alternatives(self):
-        relations = [
-            {"source": "orders", "target": "dim_date", "edge_attributes": {"JoinKeys": "orders.order_date_id = dim_date.id"}},
-            {"source": "orders", "target": "dim_date", "edge_attributes": {"JoinKeys": "orders.ship_date_id = dim_date.id"}},
-        ]
-        with patch("MetadataManager.MetadataStore.relationdb.kuzuDB.getObj",
-                   return_value=self._graph({"orders", "dim_date"})), \
-             patch("MetadataManager.MetadataStore.relationdb.kuzuDB.getRelations", return_value=relations), \
-             patch("backend.app._determine_join_type", return_value="n:1"):
-            out = text(call("find_join_path", {"tables": ["Orders", "dim_date"]}))
-
+        out = self.run(["Orders", "customers", "dim_date"])
+        assert "- orders → customers [n:1] ON orders.customer_id = customers.id" in out
         assert "- orders → dim_date [n:1] ON orders.order_date_id = dim_date.id" in out
-        assert "orders.ship_date_id" in out
+        assert "    - or ON orders.ship_date_id = dim_date.id" in out
+        assert "Row multiplication" not in out
 
     def test_reports_unknown_and_unreachable_tables(self):
-        with patch("MetadataManager.MetadataStore.relationdb.kuzuDB.getObj",
-                   return_value=self._graph({"orders", "audit_log"})), \
-             patch("MetadataManager.MetadataStore.relationdb.kuzuDB.getRelations", return_value=[]):
-            out = text(call("find_join_path", {"tables": ["orders", "audit_log", "ghost"]}))
-
-        assert "No join path found to: orders, audit_log" in out
+        # daily_sales is only linked by a lineage edge, so it can't be joined
+        out = self.run(["orders", "daily_sales", "audit_log", "ghost"])
+        assert "No join path found to: orders, daily_sales, audit_log" in out
         assert "Unknown tables (not in the join graph): ghost" in out
 
     def test_needs_two_tables(self):
         assert text(call("find_join_path", {"tables": ["orders"]})) == "Pass at least two tables."
+
+
+class TestJoinPlanner:
+    """relationdb.joinpath: cardinality, lineage exclusion, Steiner tree."""
+
+    def test_join_type(self):
+        from MetadataManager.MetadataStore.relationdb.joinpath import join_type
+
+        keys = {("customers", "id"), ("orders", "id")}
+        assert join_type("orders.customer_id = customers.id", "orders", "customers", keys) == "n:1"
+        assert join_type("orders.customer_id = customers.id", "customers", "orders", keys) == "1:n"
+        assert join_type("a.x = b.y", "a", "b", set()) == "n:m"
+        assert join_type("orders.id = customers.id", "orders", "customers", keys) == "1:1"
+
+    def test_prefers_key_hops_over_many_to_many_shortcut(self):
+        import networkx as nx
+
+        from MetadataManager.MetadataStore.relationdb.joinpath import connect_tables
+
+        G = nx.DiGraph()
+        for a, b, k in [("orders", "customers", "orders.customer_id = customers.id"),
+                        ("customers", "regions", "customers.region_id = regions.id"),
+                        ("orders", "regions", "orders.ship_region = regions.code")]:   # n:m shortcut
+            G.add_edge(a, b, JoinKeys=k)
+            G.add_edge(b, a, JoinKeys=k)
+        rels, unreachable = connect_tables(G, ["orders", "regions"], {("customers", "id"), ("regions", "id")})
+        assert [(r["source"], r["target"]) for r in rels] == [("orders", "customers"), ("customers", "regions")]
+        assert unreachable == []
+
+    def test_one_tree_for_many_tables(self):
+        import networkx as nx
+
+        from MetadataManager.MetadataStore.relationdb.joinpath import connect_tables
+
+        # star around orders plus a redundant cycle customers—regions—stores—customers
+        G = nx.DiGraph()
+        for a, b in [("orders", "customers"), ("orders", "stores"), ("orders", "products"),
+                     ("customers", "regions"), ("stores", "regions"), ("customers", "stores")]:
+            k = f"{a}.{b}_id = {b}.id"
+            G.add_edge(a, b, JoinKeys=k)
+            G.add_edge(b, a, JoinKeys=k)
+        rels, _ = connect_tables(G, ["customers", "stores", "products"])
+        nodes = {r["source"] for r in rels} | {r["target"] for r in rels}
+        assert len(rels) == len(nodes) - 1  # a tree: no redundant or circular joins
+        assert {"customers", "stores", "products"} <= nodes
+
+    def test_lineage_and_keyless_edges_are_not_joins(self):
+        from MetadataManager.MetadataStore.relationdb.joinpath import connect_tables
+
+        rels, unreachable = connect_tables(_join_graph(), ["orders", "daily_sales"])
+        assert rels == [] and unreachable == ["orders", "daily_sales"]
+
+
+class TestPromptJoinPaths:
+    def test_cardinality_tags_and_fan_out_warning(self):
+        from APIManager.PromptBuilder import PromptBuilder
+
+        rels = [
+            {"source": "orders", "target": "customers", "cardinality": "n:1",
+             "edge_attributes": {"JoinKeys": "orders.customer_id = customers.id"}},
+            {"source": "orders", "target": "order_items", "cardinality": "1:n",
+             "edge_attributes": {"JoinKeys": "order_items.order_id = orders.id"}},
+        ]
+        out = PromptBuilder.format_schema({"user_query": "q", "table_list": {"direct": {}, "intermediate": {}},
+                                           "join_keys": rels})
+        assert "- orders → customers [n:1] via orders.customer_id = customers.id" in out
+        assert "Row multiplication: orders → order_items (1:n)" in out
+        assert "orders → customers (n:1)" not in out
 
 
 # ---------------------------------------------------------------------------

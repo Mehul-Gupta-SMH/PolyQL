@@ -58,7 +58,9 @@ def test_getRelations_returns_shortest_path_edges(tmp_path, monkeypatch):
             "node1_attributes": graph.nodes[path[i]],
             "node2_attributes": graph.nodes[path[i + 1]],
         })
-    assert relations == expected
+    # Relations now also carry the hop's cardinality (n:m here: no key metadata)
+    assert [{k: v for k, v in r.items() if k != "cardinality"} for r in relations] == expected
+    assert all(r["cardinality"] == "n:m" for r in relations)
 
     assert len(relations) == 2
     assert relations[0]["source"] == "source"
@@ -145,3 +147,44 @@ def test_empty_join_keys_dropped_when_real_condition_exists():
 
     assert graph["a"]["b"]["JoinKeys"] == "a.id = b.a_id"
     assert "JoinKeysAlternatives" not in graph["a"]["b"]
+
+
+def test_edge_kind_is_stored_and_lineage_is_not_joinable(tmp_path, monkeypatch):
+    _prepare_temp_relations(monkeypatch, tmp_path)
+    graph = kuzuDB.getObj("kind-instance")
+    kuzuDB.addRelations(
+        graph,
+        [
+            ("Orders", "Customers", "orders.customer_id = customers.id"),
+            ("Orders", "Daily_Sales", "", "lineage"),
+        ],
+        instance_name="kind-instance",
+    )
+    reloaded = kuzuDB.getObj("kind-instance")
+    assert reloaded["orders"]["customers"]["Kind"] == "fk"
+    assert reloaded["orders"]["daily_sales"]["Kind"] == "lineage"
+    # lineage edges stay in the graph (lineage views) but never become joins
+    assert reloaded.has_edge("orders", "daily_sales")
+    assert kuzuDB.getRelations(reloaded, ["Orders", "Daily_Sales"]) == []
+
+
+def test_kind_column_added_to_existing_database(tmp_path, monkeypatch):
+    import kuzu
+
+    _prepare_temp_relations(monkeypatch, tmp_path)
+    base = str(tmp_path / "relationsdb" / "kuzudb")
+    monkeypatch.setattr(kuzuDB, "_kuzu_base_dir", lambda: base)
+    kuzuDB._DB_POOL.pop("old-instance", None)
+    kuzuDB._SCHEMA_READY.discard("old-instance")
+
+    # A database created before edge kinds existed
+    old = kuzu.Connection(kuzu.Database(kuzuDB._instance_db_path("old-instance")))
+    old.execute("CREATE NODE TABLE KTable(name STRING, PRIMARY KEY(name))")
+    old.execute("CREATE REL TABLE JoinRel(FROM KTable TO KTable, JoinKeys STRING)")
+    old.execute("CREATE (:KTable {name: 'a'}), (:KTable {name: 'b'})")
+    old.execute("MATCH (a:KTable {name: 'a'}), (b:KTable {name: 'b'}) CREATE (a)-[:JoinRel {JoinKeys: 'a.id = b.a_id'}]->(b)")
+    del old
+
+    kuzuDB._DB_POOL.pop("old-instance", None)
+    graph = kuzuDB.getObj("old-instance")
+    assert graph["a"]["b"]["Kind"] == "fk"  # existing edges default to fk
