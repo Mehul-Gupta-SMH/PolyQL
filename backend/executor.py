@@ -53,7 +53,8 @@ def execute_read_only(sql: str, connection_string: str, max_rows: int = 100, tim
     of that, the transaction is always rolled back, and where the dialect
     supports it the session is made read-only and given a statement timeout:
       postgresql — SET TRANSACTION READ ONLY + SET LOCAL statement_timeout
-      mysql      — SET SESSION max_execution_time (SELECT only)
+      mysql      — SET SESSION TRANSACTION READ ONLY + max_execution_time (SELECT only)
+      mariadb    — SET SESSION TRANSACTION READ ONLY + max_statement_time
       sqlite     — PRAGMA query_only + a progress-handler deadline
     The real guarantee is a database user with read-only grants; use one.
 
@@ -81,8 +82,15 @@ def execute_read_only(sql: str, connection_string: str, max_rows: int = 100, tim
                 conn.execute(text(f"SET LOCAL statement_timeout = {timeout_ms}"))
                 enforced += ["read_only_transaction", "statement_timeout"]
             elif dialect in ("mysql", "mariadb"):
-                conn.execute(text(f"SET SESSION max_execution_time = {timeout_ms}"))
-                enforced.append("statement_timeout")
+                # SET doesn't open a transaction, so the SELECT below starts a read-only one.
+                # The engine is disposed afterwards, so the session setting never leaks.
+                conn.execute(text("SET SESSION TRANSACTION READ ONLY"))
+                if getattr(engine.dialect, "is_mariadb", False):
+                    # MariaDB has no max_execution_time; max_statement_time is in seconds
+                    conn.execute(text(f"SET SESSION max_statement_time = {max(timeout_s, 0.001):.3f}"))
+                else:
+                    conn.execute(text(f"SET SESSION max_execution_time = {timeout_ms}"))
+                enforced += ["read_only_transaction", "statement_timeout"]
             elif dialect == "sqlite":
                 conn.execute(text("PRAGMA query_only = ON"))
                 raw = conn.connection.driver_connection

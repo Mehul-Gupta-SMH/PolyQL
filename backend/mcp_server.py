@@ -378,6 +378,38 @@ def _writes_via_into(sql: str) -> bool:
     return bool(_INTO_RE.search(sql))
 
 
+def _unqualified_columns(statement) -> list:
+    """
+    Bare column names in a parsed statement (sqlparse), lowercased.
+
+    Skipped: qualified parts (x.col), function names (fn(...)), and aliases —
+    a name right after AS, ')', END or another name/literal (`count(*) n`,
+    `orders o`) is an alias, and later uses of it (ORDER BY n) are skipped too.
+    """
+    from sqlparse import tokens as T
+
+    toks = [t for t in statement.flatten() if not t.is_whitespace and t.ttype not in T.Comment]
+    aliases, candidates = set(), []
+    for i, tok in enumerate(toks):
+        if tok.ttype is not T.Name:
+            continue
+        prev = toks[i - 1] if i else None
+        nxt = toks[i + 1] if i + 1 < len(toks) else None
+        if nxt is not None and nxt.value in (".", "("):
+            continue
+        if prev is not None and prev.value == ".":
+            continue
+        name = tok.value.strip('`"[]').lower()
+        if prev is not None and (
+            prev.normalized in ("AS", "END") or prev.value == ")"
+            or prev.ttype is T.Name or prev.ttype in T.Literal
+        ):
+            aliases.add(name)
+            continue
+        candidates.append(name)
+    return [c for c in dict.fromkeys(candidates) if c not in aliases]
+
+
 class SQLCheck(TypedDict):
     valid: bool
     read_only: bool
@@ -395,9 +427,10 @@ def validate_sql(sql: str, instance: str = "default") -> SQLCheck:
 
     Reports whether it parses, whether every statement is read-only
     (SELECT / WITH … SELECT), any FROM/JOIN table that PolyQL doesn't know
-    (CTE names are ignored), and any qualified column (alias.column or
-    table.column) that doesn't exist on its table. Unqualified columns are not
-    checked, so qualify columns to get them checked. Does not run the query.
+    (CTE names are ignored), and any column that doesn't exist: qualified
+    columns (alias.column) against their table; bare columns against the
+    FROM/JOIN tables when every source is a known table (not a CTE or
+    subquery). Does not run the query.
     Returns {valid, read_only, statement_types, unknown_tables,
     unknown_columns, errors, warnings}.
     """
@@ -459,6 +492,21 @@ def validate_sql(sql: str, instance: str = "default") -> SQLCheck:
             ref = f"{qualifier}.{column}"
             if column not in columns and ref not in unknown_columns:
                 unknown_columns.append(ref)
+        # Bare columns: only judged when every FROM/JOIN source is a known table
+        # with column metadata (no CTEs, no subqueries), so a miss can't be a
+        # column that some other source provides.
+        if (len(statements) == 1 and refs and not ctes and not unknown
+                and not re.search(r"\(\s*SELECT\b", cleaned, re.IGNORECASE)):
+            source_columns = [
+                known_columns.get(t) or known_columns.get(by_short.get(t.rsplit(".", 1)[-1], ""))
+                for t in refs
+            ]
+            if all(source_columns):
+                available = set().union(*source_columns)
+                skip = set(aliases) | set(refs) | {r.rsplit(".", 1)[-1] for r in refs}
+                for column in _unqualified_columns(statements[0]):
+                    if column not in available and column not in skip and column not in unknown_columns:
+                        unknown_columns.append(column)
     if unknown_columns:
         errors.append(f"Unknown columns: {', '.join(unknown_columns)}.")
 

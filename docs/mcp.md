@@ -14,7 +14,7 @@ By default it runs in **context mode**. The tools return schema context, and you
 | `get_table_schema(table, instance)` | Full column metadata for one table, including source expressions for pipeline-derived tables |
 | `find_join_path(tables, instance)` | Each join hop with its condition and cardinality (`1:1`, `1:n`, `n:1`, `n:m`). Lists every alternative when two tables can be joined more than one way, and reports tables that can't be connected |
 | `get_business_terms(question, instance)` | Glossary definitions and canonical formulas |
-| `validate_sql(sql, instance)` | `{valid, read_only, statement_types, unknown_tables, unknown_columns, errors, warnings}`. Checks that the SQL parses, that every statement is read-only, that FROM/JOIN tables are known, and that qualified columns (`alias.column`, `table.column`) exist on their table. Unqualified columns, and columns of CTEs or subqueries, aren't checked. It doesn't run the query |
+| `validate_sql(sql, instance)` | `{valid, read_only, statement_types, unknown_tables, unknown_columns, errors, warnings}`. Checks that the SQL parses, that every statement is read-only, that FROM/JOIN tables are known, and that columns exist. Qualified columns (`alias.column`) are checked against their table. Bare columns are checked against the FROM/JOIN tables when every source is a known table, not a CTE or subquery. Aliases, functions and keywords are skipped. It doesn't run the query |
 | `get_lineage(table, instance)` | The tables connected to a table in the graph, with join keys |
 | `get_derivatives(table, instance)` | Pipeline lineage: which tables a derived table is built from, and which tables are derived from it |
 | `execute_sql(sql, instance, max_rows, question)` | **Opt-in.** Runs one read-only `SELECT` and returns `{columns, rows, row_count, truncated, latency_ms, enforced, error}`. See [Running queries](#running-queries-execute_sql) |
@@ -43,6 +43,15 @@ The server uses the same metadata stores and `Utilities/retrieval_config.YAML` a
 The embedding model, reranker and ChromaDB load on the first `search_schema` or `get_business_terms` call, not at start-up. Expect the first call to be slow.
 
 ## Claude Code
+
+A ready-made skill teaches the agent the workflow: search, then join paths, then write, then validate, then optionally run. Copy it into your project:
+
+```bash
+mkdir -p .claude/skills && cp -r /path/to/PolyQL/docs/agent-skill/polyql-sql .claude/skills/
+```
+
+For other agents (Codex, an `AGENTS.md`), paste the **Workflow** section of [`docs/agent-skill/polyql-sql/SKILL.md`](agent-skill/polyql-sql/SKILL.md) into your instructions.
+
 
 ```bash
 claude mcp add polyql -- python /path/to/PolyQL/backend/mcp_server.py
@@ -112,7 +121,8 @@ Safeguards:
   | Database | Read-only | Timeout |
   |---|---|---|
   | PostgreSQL | `SET TRANSACTION READ ONLY` | `statement_timeout` |
-  | MySQL / MariaDB | (rollback only) | `max_execution_time`, which only applies to `SELECT` |
+  | MySQL | `SET SESSION TRANSACTION READ ONLY` | `max_execution_time` (applies to `SELECT`) |
+  | MariaDB | `SET SESSION TRANSACTION READ ONLY` | `max_statement_time` |
   | SQLite | `PRAGMA query_only` | Interrupted via a progress handler |
   | Others | (rollback only) | Not enforced |
 
@@ -173,8 +183,8 @@ tools = await client.get_tools()
 
 ## Not yet available
 
-- Column checks for unqualified columns and for CTE or subquery columns in `validate_sql`
-- Read-only enforcement beyond rollback on MySQL and other databases
+- Column checks inside CTEs and subqueries in `validate_sql`
+- Read-only enforcement beyond rollback on databases other than PostgreSQL, MySQL/MariaDB and SQLite
 - Measured cold-start time on a full install
 
 These are tracked in [#30](https://github.com/Mehul-Gupta-SMH/PolyQL/issues/30), section 5.

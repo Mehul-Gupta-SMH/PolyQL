@@ -276,6 +276,25 @@ class TestValidateSQL:
         with patch.object(srv, "_known_columns", return_value={}):
             assert self.check("SELECT o.whatever FROM orders o")["unknown_columns"] == []
 
+    def test_flags_unknown_bare_columns(self, known_tables):
+        result = self.check("SELECT nme, region, id FROM sales.customers WHERE regoin = 'eu' ORDER BY id")
+        assert result["unknown_columns"] == ["nme", "regoin"]
+
+    def test_bare_columns_aliases_functions_and_keywords_pass(self, known_tables):
+        sql = (
+            "SELECT id, total_usd AS amt, count(*) n, EXTRACT(YEAR FROM placed_at), "
+            "CASE WHEN total_usd > 1 THEN 'a' ELSE 'b' END kind, CAST(id AS varchar) "
+            "FROM orders o JOIN sales.customers c ON c.id = o.customer_id "
+            "WHERE region = 'eu' AND name LIKE 'x%' AND placed_at > CURRENT_DATE - INTERVAL '1' DAY "
+            "GROUP BY id ORDER BY amt, n"
+        )
+        assert self.check(sql)["unknown_columns"] == []
+
+    def test_bare_columns_not_judged_with_ctes_or_subqueries(self, known_tables):
+        assert self.check("WITH r AS (SELECT * FROM orders) SELECT anything FROM r")["unknown_columns"] == []
+        assert self.check("SELECT foo FROM (SELECT id AS foo FROM orders) t")["unknown_columns"] == []
+        assert self.check("SELECT id FROM orders WHERE customer_id IN (SELECT id FROM sales.customers)")["valid"]
+
     def test_column_metadata_unavailable_warns(self):
         with patch.object(srv, "_known_tables", return_value=dict(KNOWN)), \
              patch.object(srv, "_known_columns", return_value=None):
@@ -609,3 +628,43 @@ class TestBearerAuth:
 
         _run(lambda: srv.BearerAuth(app, [lambda t: False])({"type": "lifespan"}, None, None))
         assert reached == ["lifespan"]
+
+
+class TestExecuteReadOnlyDialects:
+    """Which session statements each dialect gets (verified live against MariaDB 10.11 / PostgreSQL 16)."""
+
+    def statements(self, dialect, is_mariadb=False):
+        import backend.executor as ex
+
+        executed = []
+        conn = MagicMock()
+        conn.execute.side_effect = lambda clause: executed.append(clause) or MagicMock(
+            keys=lambda: ["n"], fetchmany=lambda n: [(1,)])
+        engine = MagicMock()
+        engine.dialect.name = dialect
+        engine.dialect.is_mariadb = is_mariadb
+        engine.connect.return_value.__enter__.return_value = conn
+        with patch.object(ex, "create_engine", return_value=engine), patch.object(ex, "text", side_effect=str):
+            _, rows, _, enforced = ex.execute_read_only("SELECT 1", "x://", 10, 2.5)
+        conn.rollback.assert_called_once()
+        engine.dispose.assert_called_once()
+        return executed, enforced
+
+    def test_postgresql(self):
+        executed, enforced = self.statements("postgresql")
+        assert executed[:2] == ["SET TRANSACTION READ ONLY", "SET LOCAL statement_timeout = 2500"]
+        assert {"read_only_transaction", "statement_timeout"} <= set(enforced)
+
+    def test_mysql(self):
+        executed, _ = self.statements("mysql")
+        assert executed[:2] == ["SET SESSION TRANSACTION READ ONLY", "SET SESSION max_execution_time = 2500"]
+
+    def test_mariadb_uses_max_statement_time(self):
+        # MariaDB has no max_execution_time: using it failed every query
+        executed, enforced = self.statements("mysql", is_mariadb=True)
+        assert executed[:2] == ["SET SESSION TRANSACTION READ ONLY", "SET SESSION max_statement_time = 2.500"]
+        assert "read_only_transaction" in enforced
+
+    def test_other_dialects_rollback_only(self):
+        executed, enforced = self.statements("mssql")
+        assert executed == ["SELECT 1"] and enforced == ["rollback"]
