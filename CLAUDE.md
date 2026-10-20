@@ -63,7 +63,7 @@ Guidelines and context for AI-assisted development on this project.
 - Test suite lives in `tests/` — 193 tests as of 2026-03-21
 - `conftest.py` pre-mocks heavy ML packages (torch, chromadb, sentence-transformers, FlagEmbedding, sqlalchemy, pyvis)
 - `requirements-ci.txt` installs the lightweight runtime deps CI needs (requests, kuzu, PyJWT, etc.)
-- Run all tests: `pytest tests/`
+- Run all tests: `pytest tests/` (an autouse fixture clears the retrieval cache and shared models between tests)
 - Lint: `python -m ruff check backend/ tests/ validation/` (runs in CI before tests)
 
 ## Observability
@@ -120,3 +120,4 @@ Guidelines and context for AI-assisted development on this project.
 | 2026-10-20 | `benchmark/run_inference.py`, `benchmark/compare.py`, `benchmark/mcp_coldstart.py`, `tests/test_benchmark_tools.py` | #30: `--without okf,glossary,evidence` ablations, run comparison with McNemar test, MCP cold-start timer; 12 new tests (413 total) |
 | 2026-10-20 | `backend/glossary.py`, `MetadataManager/GlossaryStore.py`, `frontend/…/BusinessGlossary.jsx`, `frontend/src/utils/glossaryImport.js`, `App.jsx`, `tests/test_glossary_api.py` | SL4: Glossary tab (search, add/edit/delete, CSV/JSON import, re-index); API now authenticated, embeds on create/update/import and unindexes on delete, `POST /reindex`, bulk upsert by name, 409 on duplicate names; 13 new tests (426 total) + 8 Vitest tests |
 | 2026-10-20 | `.github/workflows/ci.yml`, `frontend/src/App.test.jsx`, `frontend/…/__tests__/QueryInput.test.jsx`, `SQLResult.test.jsx`, `ChatInterface.jsx` | CI3: frontend job in CI (vitest + build); stale frontend tests updated to the current UI (64 pass); chat 401 now logs out instead of showing an error |
+| 2026-10-20 | `MetadataManager/MetadataStore/shared_models.py`, `MetadataManager/retrieval_cache.py`, `RAGPipeline.py`, `GlossaryStore.py`, `OKFStore.py`, `ManageRelations.py`, `importData.py`, `backend/ingestion.py`, `backend/okf.py`, `main.py`, `retrieval_config.YAML`, `tests/test_retrieval_cache.py` | P2: models/Chroma client loaded once per process; TTL+LRU cache of `getRelevantContext()` cleared on every metadata write (generation guard against writes mid-search); 32 new tests (457 total) |

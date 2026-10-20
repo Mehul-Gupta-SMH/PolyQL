@@ -159,8 +159,13 @@ def getRelevantContext(user_query: str, instance_name: str = "default") -> dict:
     :param instance_name: Named database instance to scope metadata lookups.
     :return: Dict containing user_query, table_list, and join_keys.
     """
-    queryContext = SQLBuilderSupport(instance_name=instance_name)
-    return queryContext.getBuildComponents(user_query)
+    from MetadataManager.retrieval_cache import cached_context
+
+    def _retrieve():
+        return SQLBuilderSupport(instance_name=instance_name).getBuildComponents(user_query)
+
+    # Callers get their own copy, so adding glossary_hits etc. is safe
+    return cached_context(user_query, instance_name, _retrieve)
 
 
 _PROMPT_MAP = {

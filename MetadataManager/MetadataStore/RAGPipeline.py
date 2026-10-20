@@ -1,7 +1,5 @@
 # --------------------------------------------------------------------------------------------
-from FlagEmbedding import FlagReranker
 from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
 
 # --------------------------------------------------------------------------------------------
 
@@ -9,6 +7,7 @@ import uuid
 
 # --------------------------------------------------------------------------------------------
 
+from MetadataManager.MetadataStore.shared_models import get_chroma_client, get_embedding_model, get_reranker
 from MetadataManager.MetadataStore.vdb.Chroma import ChromaVectorStore
 from Utilities.base_utils import get_config_val
 
@@ -27,13 +26,7 @@ class FilterContext:
         """
         Initialize the FilterContext with pre-trained models.
         """
-        models_repo = get_config_val("retrieval_config", ["models_repo"], True)
-        scoring_configs = get_config_val("retrieval_config", ["scoring"], True)
-
-        self.RerankerModel = FlagReranker(
-            models_repo['path'] + "/" + scoring_configs["crossencoder"],
-            use_fp16=True
-        )
+        self.RerankerModel = get_reranker()
 
     def __ScoreResults_reranker__(self, base_query: str, retrieved_info: str):
         """
@@ -98,15 +91,11 @@ class ManageInformation:
         """
         Initialize the ManageInformation instance.
         """
-        models_repo = get_config_val("retrieval_config", ["models_repo"], True)
-        indexing_configs = get_config_val("retrieval_config", ["indexing"], True)
         self.vectordb_configs = get_config_val("retrieval_config", ["vectordb"], True)
 
         self.dbName = self.vectordb_configs["name"]
         self.vdb = None
-        self.embedding_model = SentenceTransformer(
-            models_repo['path'] + "/" + indexing_configs["model"]
-        )
+        self.embedding_model = get_embedding_model()
         self.FilterScoreObj = FilterContext()
 
     def initialize_client(self):
@@ -119,14 +108,7 @@ class ManageInformation:
         """
         if self.dbName == 'chroma':
             self.vdb = ChromaVectorStore()
-            self.vdb.connect(
-                sessions_args={
-                    'path': self.vectordb_configs["path"],
-                    'host': "0.0.0.0",
-                    'port': "5432"
-                },
-                session_type='local'
-            )
+            self.vdb.client = get_chroma_client(self.vectordb_configs["path"])
 
     def add_new_data(self, data, data_metadata, vdb_metadata):
         """

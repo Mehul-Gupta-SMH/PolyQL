@@ -62,6 +62,11 @@ okf:
   include_in_prompt: true  # render matched concepts as a ## Knowledge Notes block
   prompt_chars: 800      # max characters of each concept's body in the prompt
 
+cache:
+  enabled: true          # in-process cache of retrieved schema context; cleared on any metadata write
+  ttl_seconds: 300       # entries expire after this long
+  max_entries: 256       # least recently used entries are evicted beyond this
+
 re_retrieval:
   max_rounds: 3          # total query attempts (initial + up to 2 rewrites)
   min_direct_tables: 2   # stop early when this many direct tables are found

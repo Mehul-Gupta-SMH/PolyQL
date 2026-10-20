@@ -37,3 +37,22 @@ from backend.auth import get_current_user  # noqa: E402
 _FAKE_USER = {"sub": "testuser", "uid": 1}
 
 app.dependency_overrides[get_current_user] = lambda: _FAKE_USER
+
+
+# ---------------------------------------------------------------------------
+# Keep process-wide caches (retrieval results, loaded models/clients) from
+# leaking between tests.
+# ---------------------------------------------------------------------------
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_state():
+    from MetadataManager import retrieval_cache
+    from MetadataManager.MetadataStore import shared_models
+
+    retrieval_cache.clear()
+    shared_models.reset()
+    yield
+    retrieval_cache.clear()
+    shared_models.reset()

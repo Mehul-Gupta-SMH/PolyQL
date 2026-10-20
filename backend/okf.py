@@ -30,11 +30,11 @@ class OKFImportRequest(BaseModel):
 
 def _chroma_client():
     """ChromaDB client only — listing/removing bundles needs no embedding model."""
-    from MetadataManager.MetadataStore.vdb.Chroma import getclient
+    from MetadataManager.MetadataStore.shared_models import get_chroma_client
     from Utilities.base_utils import get_config_val
 
     vectordb = get_config_val("retrieval_config", ["vectordb"], True)
-    return getclient({"path": vectordb["path"]}, session_type="local")
+    return get_chroma_client(vectordb["path"])
 
 
 @router.post("/import")
