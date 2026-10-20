@@ -31,14 +31,11 @@ FK = "fk"
 # Edge weights: prefer joins that follow a key; avoid many-to-many
 _WEIGHTS = {"1:1": 1.0, "n:1": 1.0, "1:n": 1.0, "n:m": 3.0}
 
-_SIDE_RE = re.compile(r'(?:[`"\[]?([^.`"\]\s]+)[`"\]]?\.)?[`"\[]?([^.`"\]\s]+)[`"\]]?')
-
-
 def _side(expr: str) -> tuple:
-    match = _SIDE_RE.match(expr.strip())
-    if not match:
-        return "", expr.strip().lower()
-    return (match.group(1) or "").lower(), (match.group(2) or "").lower()
+    """'schema.table.col' → ('schema.table', 'col'); quotes removed, lowercased."""
+    name = re.sub(r'[`"\[\]\s]', "", expr).lower()
+    table, _, column = name.rpartition(".")
+    return table, column
 
 
 def join_type(join_keys: str, src: str, tgt: str, unique_columns: set) -> str:
