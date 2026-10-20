@@ -254,10 +254,12 @@ def format_column_mappings(column_mappings: list) -> str:
 def store_table(
     table_name: str,
     table_desc: str,
-    columns: list,        # [{name, type, constraints, desc}]
-    relationships: list,  # [{source, target, join_keys}]
+    columns: list,        # [{name, type, constraints, desc, source_expr?, logic_type?}]
+    relationships: list,  # [{source, target, join_keys, kind?}]; kind is fk (default) or lineage
     instance_name: str = "default",
     db_type: str = "generic",
+    vdb=None,
+    replace: bool = False,
 ) -> None:
     """
     Persist a new table's metadata to all storage backends:
@@ -267,6 +269,10 @@ def store_table(
 
     :param instance_name: Named database instance (e.g. "default", "snowflake_prod").
     :param db_type: Technology label (e.g. "generic", "snowflake", "databricks").
+    :param vdb: An initialised RAGPipeline.ManageInformation to reuse; bulk imports pass
+                one so the embedding model loads once instead of once per table.
+    :param replace: Delete the table's existing tableDesc / tableColMetadata rows for this
+                    instance first, so re-importing doesn't duplicate them.
     """
     from Utilities.base_utils import accessDB
     from MetadataManager.MetadataBuilder.importExisting.importData import importDD
@@ -284,6 +290,10 @@ def store_table(
     importer.createTable()
 
     db = accessDB("table", "tableMetadata")
+    if replace:
+        db.delete_data("tableDesc", {"tableName": table_name, "instance_name": instance_name})
+        db.delete_data("tableColMetadata",
+                       {"TableName": table_name, "instance_name": instance_name})
     db.post_data("tableDesc", [{
         "tableName": table_name,
         "Desc": table_desc,
@@ -298,7 +308,10 @@ def store_table(
             "DataType": col.get("type", ""),
             "Constraints": col.get("constraints", ""),
             "logic": col.get("source_expr", ""),      # pipeline source expression
-            "type_of_logic": "pipeline" if col.get("source_expr") else "",
+            # "pipeline" marks a derived table; other sources (e.g. Ossie field
+            # expressions) pass their own logic_type
+            "type_of_logic": (col.get("logic_type")
+                              or ("pipeline" if col.get("source_expr") else "")),
             "base_table": "",
             "Desc": col.get("desc", ""),
             "instance_name": instance_name,
@@ -309,8 +322,9 @@ def store_table(
     db.post_data("tableColMetadata", records)
 
     # 2. ChromaDB -------------------------------------------------------------
-    vdb = ManageInformation()
-    vdb.initialize_client()
+    if vdb is None:
+        vdb = ManageInformation()
+        vdb.initialize_client()
     vdb.add_new_data(
         table_desc,
         {"TableName": table_name, "ENV": db_type, "DB": instance_name, "TType": "System"},
@@ -327,7 +341,8 @@ def store_table(
     if relationships:
         rel_mgr = Relations(instance_name=instance_name)
         edges = [
-            [r["source"].lower(), r["target"].lower(), r.get("join_keys", "")]
+            [r["source"].lower(), r["target"].lower(), r.get("join_keys", ""),
+             r.get("kind") or "fk"]
             for r in relationships
         ]
         rel_mgr.addRelation(edges)

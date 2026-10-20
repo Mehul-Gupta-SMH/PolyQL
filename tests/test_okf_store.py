@@ -140,6 +140,7 @@ class TestImportBundle:
             summary = OKFStore.import_bundle(str(bundle), _model(), MagicMock(), instance_name="prod")
 
         assert summary == {
+            "bundle": bundle.name,   # defaults to the bundle directory's name
             "indexed": 3, "skipped": ["/notes/broken", "/notes/no_type"],
             "deprecated": 1, "table_concepts": 2,
         }
@@ -422,3 +423,168 @@ def test_bom_prefixed_concept_is_parsed(tmp_path):
     (tmp_path / "orders.md").write_bytes("﻿---\ntype: Table\n---\nBody\n".encode("utf-8"))
     concepts, skipped = OKFStore.load_bundle(str(tmp_path))
     assert [c["concept_id"] for c in concepts] == ["/orders"] and skipped == []
+
+
+class _FakeCollection:
+    """Just enough of a ChromaDB collection for bundle listing/removal."""
+
+    def __init__(self, rows):
+        self.rows = dict(rows)  # id -> metadata
+
+    def get(self, where=None, include=None):
+        ids = [i for i, m in self.rows.items()
+               if not where or all(m.get(k) == v for k, v in where.items())]
+        return {"ids": ids, "metadatas": [self.rows[i] for i in ids]}
+
+    def delete(self, ids):
+        for i in ids:
+            self.rows.pop(i)
+
+
+def _fake_client(rows):
+    client = MagicMock()
+    client.get_collection.return_value = _FakeCollection(rows)
+    return client
+
+
+_ROWS = {
+    "a": {"instance_name": "default", "bundle": "sales"},
+    "b": {"instance_name": "default", "bundle": "sales"},
+    "c": {"instance_name": "default", "bundle": "hr"},
+    "d": {"instance_name": "prod", "bundle": "sales"},
+    "e": {"instance_name": "default"},  # imported before bundles were tracked
+}
+
+
+class TestBundles:
+    def test_list_counts_per_instance_and_bundle(self):
+        assert OKFStore.list_bundles(_fake_client(_ROWS)) == [
+            {"instance_name": "default", "bundle": "(unnamed)", "concepts": 1},
+            {"instance_name": "default", "bundle": "hr", "concepts": 1},
+            {"instance_name": "default", "bundle": "sales", "concepts": 2},
+            {"instance_name": "prod", "bundle": "sales", "concepts": 1},
+        ]
+
+    def test_list_without_collection_is_empty(self):
+        client = MagicMock()
+        client.get_collection.side_effect = ValueError("does not exist")
+        assert OKFStore.list_bundles(client) == []
+        assert OKFStore.delete_bundle(client, "default", "sales") == 0
+
+    def test_delete_one_bundle_of_one_instance(self):
+        client = _fake_client(_ROWS)
+        assert OKFStore.delete_bundle(client, "default", "sales") == 2
+        assert set(client.get_collection.return_value.rows) == {"c", "d", "e"}
+
+    def test_delete_unnamed_bundle(self):
+        client = _fake_client(_ROWS)
+        assert OKFStore.delete_bundle(client, "default", "(unnamed)") == 1
+        assert "e" not in client.get_collection.return_value.rows
+
+    def test_delete_all_bundles_of_instance(self):
+        client = _fake_client(_ROWS)
+        assert OKFStore.delete_bundle(client, "default") == 4
+        assert set(client.get_collection.return_value.rows) == {"d"}
+
+    def test_reimport_replaces_bundle_concepts(self, bundle):
+        client = _fake_client({"stale": {"instance_name": "default", "bundle": bundle.name},
+                               "other": {"instance_name": "default", "bundle": "hr"}})
+        with patch("MetadataManager.MetadataStore.vdb.Chroma.addData"):
+            OKFStore.import_bundle(str(bundle), _model(), client)
+        assert set(client.get_collection.return_value.rows) == {"other"}
+
+
+def _export_fixture():
+    tables = {
+        "sales.orders": {"desc": "Orders placed", "columns": [
+            ("id", "int", "PRIMARY KEY", "Order id"),
+            ("customer_id", "int", "", ""),
+            ("total", "numeric", "", "Amount", "price*qty"),
+        ]},
+        "sales.customers": {"desc": "Customers", "columns": [("id", "int", "PRIMARY KEY", "")]},
+    }
+    edges = [("sales.orders", "sales.customers", "sales.orders.customer_id = sales.customers.id")]
+    unique = {("sales.customers", "id"), ("sales.orders", "id")}
+    terms = [{"term_name": "Net Revenue", "definition": "Revenue after refunds",
+              "formula": "SUM(sales.orders.total)", "table_deps": '["sales.orders"]',
+              "synonyms": '["sales"]'}]
+    return tables, edges, unique, terms
+
+
+class TestExportBundle:
+    def test_files_and_frontmatter(self):
+        files = OKFStore.export_bundle(*_export_fixture(), "2026-10-20T00:00:00+00:00")
+        assert set(files) == {"index.md", "tables/sales.orders.md", "tables/sales.customers.md",
+                              "metrics/net_revenue.md"}
+        assert 'okf_version: "0.2"' in files["index.md"] or "okf_version: '0.2'" in files["index.md"]
+        orders = files["tables/sales.orders.md"]
+        assert orders.startswith("---\ntype: Table\n")
+        assert "| total | numeric |  | Amount (expression: `price*qty`) |" in orders
+        assert "(/tables/sales.customers.md)" in orders and "(n:1)" in orders
+
+    def test_exported_bundle_reimports_onto_the_same_tables(self, tmp_path):
+        tables, *rest = _export_fixture()
+        for path, text in OKFStore.export_bundle(tables, *rest, "2026-10-20T00:00:00+00:00").items():
+            _write(tmp_path, path, text)
+        concepts, skipped = OKFStore.load_bundle(str(tmp_path))
+        by_id = {c["concept_id"]: c for c in concepts}
+        assert skipped == []
+        resolved = {
+            cid: OKFStore.resolve_tables(OKFStore.concept_table_candidates(c, by_id), list(tables))
+            for cid, c in by_id.items()
+        }
+        assert resolved["/tables/sales.customers"] == ["sales.customers"]
+        assert resolved["/metrics/net_revenue"] == ["sales.orders"]
+        assert "sales.customers" in resolved["/tables/sales.orders"]
+
+
+class TestBundleEndpoints:
+    @pytest.fixture()
+    def client(self):
+        from fastapi.testclient import TestClient
+
+        from backend.app import app
+
+        return TestClient(app)
+
+    def test_list(self, client):
+        with patch("backend.okf._chroma_client", return_value=_fake_client(_ROWS)):
+            resp = client.get("/api/okf/bundles")
+        assert resp.status_code == 200
+        assert {"instance_name": "prod", "bundle": "sales", "concepts": 1} in resp.json()["bundles"]
+
+    def test_delete(self, client):
+        fake = _fake_client(_ROWS)
+        with patch("backend.okf._chroma_client", return_value=fake):
+            resp = client.delete("/api/okf/bundles", params={"instance_name": "default", "bundle": "hr"})
+        assert resp.json() == {"removed": 1}
+        assert "c" not in fake.get_collection.return_value.rows
+
+    def test_delete_requires_instance(self, client):
+        assert client.delete("/api/okf/bundles").status_code == 422
+
+    def test_export_zip(self, client):
+        import io
+        import zipfile
+
+        with patch("MetadataManager.OssieStore.read_instance", return_value=_export_fixture()) as read:
+            resp = client.get("/api/okf/export", params={"instance_name": "prod"})
+        assert resp.status_code == 200
+        read.assert_called_once_with("prod")
+        assert resp.headers["content-type"] == "application/zip"
+        assert 'filename="polyql_prod.okf.zip"' in resp.headers["content-disposition"]
+        names = zipfile.ZipFile(io.BytesIO(resp.content)).namelist()
+        assert "polyql_prod/index.md" in names and "polyql_prod/tables/sales.orders.md" in names
+
+    def test_endpoints_require_auth(self, client):
+        from backend.app import app
+        from backend.auth import get_current_user
+
+        override = app.dependency_overrides.pop(get_current_user)
+        try:
+            codes = [client.get("/api/okf/bundles").status_code,
+                     client.delete("/api/okf/bundles", params={"instance_name": "x"}).status_code,
+                     client.get("/api/okf/export").status_code]
+        finally:
+            app.dependency_overrides[get_current_user] = override
+        assert codes == [401, 401, 401]

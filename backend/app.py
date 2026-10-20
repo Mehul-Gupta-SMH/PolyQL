@@ -1,6 +1,5 @@
 import sys
 import os
-import re
 import time
 import logging
 from contextlib import asynccontextmanager
@@ -23,6 +22,7 @@ from backend.logging_config import configure_logging
 from backend.metrics import metrics
 from backend.glossary import router as glossary_router
 from backend.okf import router as okf_router
+from backend.semantic import router as semantic_router
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ app = FastAPI(title="SQLCoder API", lifespan=lifespan)
 
 app.include_router(glossary_router)  # SL3: business glossary endpoints
 app.include_router(okf_router)       # OKF bundle import for table search
+app.include_router(semantic_router)  # Apache Ossie import / export
 
 app.add_middleware(
     CORSMiddleware,
@@ -125,6 +126,7 @@ class RelationshipMeta(BaseModel):
     source: str
     target: str
     join_keys: str = ""
+    kind: Literal["fk", "lineage"] = "fk"   # lineage edges are never used for join paths
 
 
 class IngestCommitRequest(BaseModel):
@@ -556,7 +558,7 @@ def post_ingest_preview(body: IngestPreviewRequest, user: dict = Depends(get_cur
 
     # Auto-build relationships: each source table → target table
     auto_relationships = [
-        {"source": src, "target": parsed["target_table"], "join_keys": ""}
+        {"source": src, "target": parsed["target_table"], "join_keys": "", "kind": "lineage"}
         for src in parsed["source_tables"]
     ]
 
@@ -638,9 +640,13 @@ def get_lineage(table_name: str, instance_name: str = "default"):
 @app.get("/api/joinpath")
 def get_join_path(from_table: str, to_table: str, instance_name: str = "default"):
     """
-    Return the shortest JOIN path between two tables in the schema graph.
+    Return the best JOIN path between two tables.
+
+    Uses only join edges (not pipeline lineage), prefers key-to-key hops over
+    many-to-many, and lists every alternative join condition for each hop.
     """
     from MetadataManager.MetadataStore.relationdb import kuzuDB
+    from MetadataManager.MetadataStore.relationdb.joinpath import connect_tables, load_unique_columns
 
     graph = kuzuDB.getObj(instance_name)
     src = from_table.lower()
@@ -653,28 +659,23 @@ def get_join_path(from_table: str, to_table: str, instance_name: str = "default"
     if src == tgt:
         return {"found": True, "path": [src], "edges": []}
 
-    try:
-        path = nx.shortest_path(graph.to_undirected(), source=src, target=tgt)
-    except nx.NetworkXNoPath:
+    relations, unreachable = connect_tables(graph, [src, tgt], load_unique_columns(instance_name))
+    if unreachable or not relations:
         return {"found": False, "path": [], "edges": []}
 
-    edges = []
-    seen_pairs = set()
-    for i in range(len(path) - 1):
-        a, b = path[i], path[i + 1]
-        # prefer the directed edge if it exists, otherwise try the other direction
-        data = graph.get_edge_data(a, b) or graph.get_edge_data(b, a) or {}
-        pair = frozenset({a, b})
-        if pair not in seen_pairs:
-            seen_pairs.add(pair)
-            join_keys = data.get("JoinKeys", "")
-            edges.append({
-                "source": a,
-                "target": b,
-                "joinKeys": join_keys,
-                "joinType": _determine_join_type(join_keys, a, b),
-            })
-
+    path = [src]
+    for rel in relations:
+        path.append(rel["target"])
+    edges = [
+        {
+            "source": rel["source"],
+            "target": rel["target"],
+            "joinKeys": rel["join_keys"],
+            "joinType": rel["cardinality"],
+            "alternatives": rel["alternatives"],
+        }
+        for rel in relations
+    ]
     return {"found": True, "path": path, "edges": edges}
 
 
@@ -731,83 +732,10 @@ def get_derivatives(table_name: str, instance_name: str = "default"):
     }
 
 
-def _get_metadata_db():
-    from Utilities.base_utils import accessDB, get_config_val
-
-    tmddb = get_config_val("retrieval_config", ["tableMDdb"], True)
-    db = accessDB(tmddb["info_type"], tmddb["dbName"])
-    return db, tmddb
-
-
-def _normalize_identifier(expr):
-    match = re.match(
-        r'(?:[`"\[]?([^.`"\]]+)[`"\]]?\.)?[`"\[]?([^.`"\]]+)[`"\]]?',
-        expr.strip(),
-    )
-    if not match:
-        return None, expr.strip().lower()
-    table = match.group(1)
-    column = match.group(2)
-    return (table or "").lower(), (column or expr).lower()
-
-
-def _column_is_unique(db, tmddb, table, column):
-    if not table or not column:
-        return False
-
-    try:
-        rows = db.get_data(
-            tmddb["tableColName"],
-            {"TableName": table, "ColumnName": column},
-            ["Constraints"],
-        ) or []
-    except Exception:
-        return False
-
-    if not rows:
-        return False
-
-    constraints = rows[0]
-    if isinstance(constraints, (list, tuple)):
-        constraints = constraints[0] if constraints else ""
-
-    value = (constraints or "").upper()
-    return "PRIMARY KEY" in value or "UNIQUE" in value
-
-
 def _determine_join_type(join_keys, src, tgt):
-    src = src.lower()
-    tgt = tgt.lower()
+    """Cardinality of joining src → tgt on join_keys (1:1, 1:n, n:1, n:m)."""
+    from MetadataManager.MetadataStore.relationdb.joinpath import join_type, load_unique_columns
+
     if not join_keys:
         return "n:m"
-
-    try:
-        db, tmddb = _get_metadata_db()
-    except Exception:
-        return "n:m"
-
-    expressions = [part.strip() for part in join_keys.split(',') if '=' in part]
-    if not expressions:
-        return "n:m"
-
-    src_unique = False
-    tgt_unique = False
-    for expr in expressions:
-        left, right = expr.split('=', 1)
-        left_table, left_column = _normalize_identifier(left)
-        right_table, right_column = _normalize_identifier(right)
-
-        if left_table == src and right_table == tgt:
-            src_unique = src_unique or _column_is_unique(db, tmddb, src, left_column)
-            tgt_unique = tgt_unique or _column_is_unique(db, tmddb, tgt, right_column)
-        elif left_table == tgt and right_table == src:
-            src_unique = src_unique or _column_is_unique(db, tmddb, src, right_column)
-            tgt_unique = tgt_unique or _column_is_unique(db, tmddb, tgt, left_column)
-
-    if src_unique and tgt_unique:
-        return "1:1"
-    if src_unique:
-        return "1:n"
-    if tgt_unique:
-        return "n:1"
-    return "n:m"
+    return join_type(join_keys, src, tgt, load_unique_columns())

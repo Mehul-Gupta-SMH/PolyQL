@@ -18,15 +18,23 @@ Usage:
       [--instance_prefix bird] \\
       [--limit 50]            # optional: only first N questions
       [--db_ids concert_singer,pets]
+      [--without okf,glossary]  # ablation: leave this context out of the prompt
+
+Ablation (--without): okf = OKF concepts (table search + Knowledge Notes),
+glossary = business definitions, evidence = BIRD evidence hints. Run the same
+questions with and without a context source, evaluate both, then compare with
+benchmark.compare. Each record stores the ablation in its "without" field.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 from benchmark._bench_utils import (
     append_jsonl,
@@ -142,6 +150,24 @@ def _build_conversation(question: str, evidence: str) -> list[dict]:
 # Main inference loop
 # ---------------------------------------------------------------------------
 
+ABLATIONS = ("okf", "glossary", "evidence")
+
+
+@contextlib.contextmanager
+def ablate(without: tuple | list = ()):
+    """Switch off context sources for generateQuery() while the block runs."""
+    unknown = set(without) - set(ABLATIONS)
+    if unknown:
+        raise ValueError(f"unknown --without value(s): {sorted(unknown)}; choose from {ABLATIONS}")
+    with contextlib.ExitStack() as stack:
+        if "okf" in without:
+            # One ChromaDB query feeds both OKF table search and the Knowledge Notes
+            stack.enter_context(patch("MetadataManager.OKFStore.search_concepts", return_value=[]))
+        if "glossary" in without:
+            stack.enter_context(patch("main._get_business_context", return_value=[]))
+        yield
+
+
 def run_inference(
     benchmark: str,
     data_dir: Path,
@@ -153,11 +179,13 @@ def run_inference(
     limit: int | None = None,
     db_ids: list[str] | None = None,
     sleep_between: float = 0.0,
+    without: tuple | list = (),
 ) -> None:
     """
     Run batch inference and write results to *output_file* (JSONL).
 
     Resumes automatically if *output_file* already contains partial results.
+    *without* lists context sources to leave out (see ABLATIONS).
     """
     from main import generateQuery  # noqa: PLC0415
 
@@ -182,6 +210,12 @@ def run_inference(
     output_file.parent.mkdir(parents=True, exist_ok=True)
     all_prior = list(read_jsonl(output_file))
     done_ids: set[str] = {r["question_id"] for r in all_prior if r.get("result_type") == "sql"}
+    prior_without = {tuple(r.get("without") or ()) for r in all_prior}
+    if prior_without - {tuple(sorted(without))}:
+        raise ValueError(
+            f"{output_file} holds results from a run with --without {sorted(prior_without)}; "
+            "use a separate --output_file per ablation"
+        )
     if all_prior:
         logger.info("Resuming — %d questions already processed (%d successful, %d errors will retry).",
                     len(all_prior), len(done_ids), len(all_prior) - len(done_ids))
@@ -197,18 +231,20 @@ def run_inference(
             continue
 
         instance_name = make_instance_name(instance_prefix, q["db_id"])
-        conversation  = _build_conversation(q["question"], q["evidence"])
+        evidence      = "" if "evidence" in without else q["evidence"]
+        conversation  = _build_conversation(q["question"], evidence)
         t0 = time.perf_counter()
 
         try:
-            result = generateQuery(
-                userQuery=q["question"],
-                LLMservice=provider,
-                query_type="sql",
-                conversation=conversation,
-                model=model,
-                instance_name=instance_name,
-            )
+            with ablate(without):
+                result = generateQuery(
+                    userQuery=q["question"],
+                    LLMservice=provider,
+                    query_type="sql",
+                    conversation=conversation,
+                    model=model,
+                    instance_name=instance_name,
+                )
             predicted_sql = result.get("content", "") if isinstance(result, dict) else str(result)
             result_type   = result.get("type", "sql") if isinstance(result, dict) else "sql"
             error_msg     = None
@@ -235,6 +271,7 @@ def run_inference(
             "model":        model or "",
             "instance_name": instance_name,
             "latency_ms":   latency_ms,
+            "without":      sorted(without),
         }
         append_jsonl(output_file, record)
         processed += 1
@@ -275,7 +312,12 @@ def _cli() -> None:
                         help="Comma-separated db_ids to include (default: all).")
     parser.add_argument("--sleep", type=float, default=0.0,
                         help="Sleep seconds between calls (rate-limit guard).")
+    parser.add_argument("--without", default="",
+                        help=f"Comma-separated context to leave out: {', '.join(ABLATIONS)}.")
     args = parser.parse_args()
+    without = [x.strip() for x in args.without.split(",") if x.strip()]
+    if set(without) - set(ABLATIONS):
+        parser.error(f"--without accepts: {', '.join(ABLATIONS)}")
 
     db_ids = [x.strip() for x in args.db_ids.split(",") if x.strip()] or None
     run_inference(
@@ -289,6 +331,7 @@ def _cli() -> None:
         limit=args.limit,
         db_ids=db_ids,
         sleep_between=args.sleep,
+        without=without,
     )
 
 

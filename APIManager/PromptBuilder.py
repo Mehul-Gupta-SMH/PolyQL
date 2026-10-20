@@ -218,9 +218,20 @@ class PromptBuilder:
         join_keys = context.get("join_keys") or []
         if join_keys:
             lines.append("## Join Paths")
+            fan_out = []
             for rel in join_keys:
                 join_attrs = (rel.get("edge_attributes") or {}).get("JoinKeys", "")
-                lines.append(f"- {rel['source']} → {rel['target']} via {join_attrs}")
+                cardinality = rel.get("cardinality")
+                tag = f" [{cardinality}]" if cardinality else ""
+                lines.append(f"- {rel['source']} → {rel['target']}{tag} via {join_attrs}")
+                if cardinality in ("1:n", "n:m"):
+                    fan_out.append(f"{rel['source']} → {rel['target']} ({cardinality})")
+            if fan_out:
+                lines.append("")
+                lines.append(
+                    "> Row multiplication: " + ", ".join(fan_out) + " can repeat rows. "
+                    "Aggregate before joining, or use COUNT(DISTINCT …), so totals aren't double-counted."
+                )
 
         return "\n".join(lines)
 

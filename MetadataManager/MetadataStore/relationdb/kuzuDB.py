@@ -75,6 +75,12 @@ def _ensure_schema(conn: kuzu.Connection, instance_name: str) -> None:
         f"CREATE REL TABLE IF NOT EXISTS {_REL_TABLE}"
         f"(FROM {_NODE_TABLE} TO {_NODE_TABLE}, JoinKeys STRING)"
     )
+    # Edge kind (fk | lineage) — added to databases created before it existed
+    try:
+        conn.execute(f"ALTER TABLE {_REL_TABLE} ADD Kind STRING DEFAULT 'fk'")
+    except RuntimeError as exc:
+        if "already has property" not in str(exc):
+            raise
     _SCHEMA_READY.add(instance_name)
 
 
@@ -96,16 +102,16 @@ def _merge_node(conn: kuzu.Connection, name: str) -> None:
     conn.execute(f"MERGE (t:{_NODE_TABLE} {{name: $n}})", {"n": name})
 
 
-def _upsert_edge(conn: kuzu.Connection, src: str, tgt: str, join_keys) -> None:
-    """Insert edge if it doesn't exist using a single MERGE round-trip."""
+def _upsert_edge(conn: kuzu.Connection, src: str, tgt: str, join_keys, kind: str = "fk") -> None:
+    """Insert edge if it doesn't exist (MERGE on its join keys) and set its kind."""
     conn.execute(
         f"MATCH (a:{_NODE_TABLE} {{name: $s}}), (b:{_NODE_TABLE} {{name: $t}})"
-        f" MERGE (a)-[:{_REL_TABLE} {{JoinKeys: $jk}}]->(b)",
-        {"s": src, "t": tgt, "jk": str(join_keys) if join_keys else ""},
+        f" MERGE (a)-[r:{_REL_TABLE} {{JoinKeys: $jk}}]->(b) SET r.Kind = $kind",
+        {"s": src, "t": tgt, "jk": str(join_keys) if join_keys else "", "kind": kind},
     )
 
 
-def _add_graph_edge(G: nx.DiGraph, src: str, tgt: str, join_keys) -> None:
+def _add_graph_edge(G: nx.DiGraph, src: str, tgt: str, join_keys, kind: str = "fk") -> None:
     """
     Add an edge to *G* without losing alternative join conditions.
 
@@ -114,13 +120,18 @@ def _add_graph_edge(G: nx.DiGraph, src: str, tgt: str, join_keys) -> None:
     → dim_date). ``JoinKeys`` keeps the first condition for existing callers;
     ``JoinKeysAlternatives`` is set only when there is more than one.
     Empty join keys are dropped once a real condition is known.
+    ``Kind`` is "fk" when any edge between the pair is a join relationship,
+    "lineage" when they are all pipeline lineage edges.
     """
     join_keys = str(join_keys) if join_keys else ""
+    kind = kind or "fk"
     if not G.has_edge(src, tgt):
-        G.add_edge(src, tgt, JoinKeys=join_keys)
+        G.add_edge(src, tgt, JoinKeys=join_keys, Kind=kind)
         return
 
     data = G[src][tgt]
+    if kind == "fk":
+        data["Kind"] = "fk"
     options = list(data.get("JoinKeysAlternatives") or [data.get("JoinKeys", "")])
     if join_keys in options:
         return
@@ -187,12 +198,12 @@ def getObj(instance_name: str = "default") -> nx.DiGraph:
 
     res = conn.execute(
         f"MATCH (a:{_NODE_TABLE})-[r:{_REL_TABLE}]->(b:{_NODE_TABLE})"
-        f" RETURN a.name, r.JoinKeys, b.name"
+        f" RETURN a.name, r.JoinKeys, b.name, r.Kind"
         f" ORDER BY a.name, b.name, r.JoinKeys"
     )
     while res.has_next():
         row = res.get_next()
-        _add_graph_edge(G, row[0], row[2], row[1])
+        _add_graph_edge(G, row[0], row[2], row[1], row[3])
 
     return G
 
@@ -201,7 +212,9 @@ def addRelations(GObj: nx.DiGraph, edges: dict, instance_name: str = "default") 
     """
     Persist *edges* to the Kuzu DB for *instance_name* and update *GObj* in place.
 
-    Each edge is stored in both directions (JOINs are semantically bidirectional).
+    Each edge is (source, target[, join_keys[, kind]]); kind is "fk" (default)
+    or "lineage". Each edge is stored in both directions (JOINs are
+    semantically bidirectional).
     """
     conn, _ = _open_instance(instance_name)
 
@@ -209,59 +222,42 @@ def addRelations(GObj: nx.DiGraph, edges: dict, instance_name: str = "default") 
         src = edge[0].lower()
         tgt = edge[1].lower()
         join_keys = edge[2] if len(edge) > 2 else ""
+        kind = (edge[3] if len(edge) > 3 else "") or "fk"
 
         _merge_node(conn, src)
         _merge_node(conn, tgt)
-        _upsert_edge(conn, src, tgt, join_keys)
-        _upsert_edge(conn, tgt, src, join_keys)  # bidirectional
+        _upsert_edge(conn, src, tgt, join_keys, kind)
+        _upsert_edge(conn, tgt, src, join_keys, kind)  # bidirectional
 
-        _add_graph_edge(GObj, src, tgt, join_keys)
-        _add_graph_edge(GObj, tgt, src, join_keys)
+        _add_graph_edge(GObj, src, tgt, join_keys, kind)
+        _add_graph_edge(GObj, tgt, src, join_keys, kind)
 
 
-def getRelations(GObj: nx.DiGraph, target_nodes: list) -> list:
+def getRelations(GObj: nx.DiGraph, target_nodes: list, unique_columns: set | None = None) -> list:
     """
-    Retrieve relations between *target_nodes* via shortest-path traversal.
-    Operates on the in-memory *GObj* (already loaded from Kuzu by getObj).
+    Plan the joins connecting *target_nodes* (see relationdb.joinpath).
 
-    Pairs with no connecting path (or unknown tables) are skipped; the
-    remaining pairs are still resolved. A hop with several alternative join
-    conditions yields one relation per alternative so all of them reach the
-    prompt.
+    Uses only join edges (lineage edges and keyless edges are skipped), prefers
+    key-to-key hops over many-to-many, and connects all tables with one tree.
+    A hop with several join conditions yields one relation per alternative.
+    Each relation: {source, target, edge_attributes: {JoinKeys, ...},
+    cardinality, node1_attributes, node2_attributes}.
     """
-    relations = []
+    from MetadataManager.MetadataStore.relationdb.joinpath import connect_tables
 
-    for comb in combinations(target_nodes, 2):
-        src, tgt = comb[0].lower(), comb[1].lower()
-        if src not in GObj or tgt not in GObj or not nx.has_path(GObj, src, tgt):
-            continue
-
-        path = nx.shortest_path(GObj, source=src, target=tgt)
-
-        for i in range(len(path) - 1):
-            edge_data = GObj.get_edge_data(path[i], path[i + 1])
-            alternatives = (edge_data or {}).get("JoinKeysAlternatives") or [None]
-            for join_keys in alternatives:
-                attrs = edge_data if join_keys is None else {**edge_data, "JoinKeys": join_keys}
-                relations.append({
-                    "source": path[i],
-                    "target": path[i + 1],
-                    "edge_attributes": attrs,
-                    "node1_attributes": GObj.nodes[path[i]],
-                    "node2_attributes": GObj.nodes[path[i + 1]],
-                })
-
-    deduped = []
-    seen = set()
+    relations, _unreachable = connect_tables(GObj, target_nodes, unique_columns)
+    out = []
     for rel in relations:
-        edge_attrs = rel["edge_attributes"] or {}
-        join_keys = edge_attrs.get("JoinKeys")
-        key = (rel["source"], rel["target"], join_keys)
-        if key not in seen:
-            seen.add(key)
-            deduped.append(rel)
-
-    return deduped
+        for join_keys in rel["alternatives"]:
+            out.append({
+                "source": rel["source"],
+                "target": rel["target"],
+                "edge_attributes": {"JoinKeys": join_keys, "Kind": "fk"},
+                "cardinality": rel["cardinality"] if join_keys == rel["join_keys"] else None,
+                "node1_attributes": GObj.nodes[rel["source"]],
+                "node2_attributes": GObj.nodes[rel["target"]],
+            })
+    return out
 
 
 def visualizeRelations(GObj: nx.DiGraph) -> str:

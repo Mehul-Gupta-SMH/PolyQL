@@ -213,33 +213,36 @@ def find_join_path(tables: list[str], instance: str = "default") -> str:
     """
     Explain how to join a set of tables, using PolyQL's join graph.
 
-    Lists each hop with its join condition and cardinality (1:1, 1:n, n:1, n:m).
-    When two tables can be joined more than one way (e.g. order_date vs
-    ship_date → dim_date), every alternative is listed: pick the one the
-    question needs. Tables that can't be connected are reported.
+    Connects all the tables with one minimal set of joins, preferring key-to-key
+    hops over many-to-many. Each hop shows its join condition and cardinality
+    (1:1, 1:n, n:1, n:m); 1:n and n:m hops multiply rows, so aggregate before
+    joining or use COUNT(DISTINCT …). When two tables can be joined more than
+    one way (e.g. order_date vs ship_date → dim_date), every alternative is
+    listed: pick the one the question needs. Pipeline lineage edges are not
+    used. Tables that can't be connected are reported.
     """
     from MetadataManager.MetadataStore.relationdb import kuzuDB
-
-    from backend.app import _determine_join_type
+    from MetadataManager.MetadataStore.relationdb.joinpath import connect_tables, load_unique_columns
 
     if len(tables) < 2:
         return "Pass at least two tables."
 
     graph = kuzuDB.getObj(instance)
-    names = [t.lower() for t in tables]
+    names = list(dict.fromkeys(t.lower() for t in tables))
     unknown = [t for t in names if t not in graph]
-    relations = kuzuDB.getRelations(graph, [t for t in names if t in graph])
+    relations, unreached = connect_tables(graph, [t for t in names if t in graph],
+                                          load_unique_columns(instance))
 
     lines = []
     if relations:
         lines.append("## Join path")
         for rel in relations:
-            keys = (rel.get("edge_attributes") or {}).get("JoinKeys", "") or "(no join keys recorded)"
-            kind = _determine_join_type(keys, rel["source"], rel["target"])
-            lines.append(f"- {rel['source']} → {rel['target']} [{kind}] ON {keys}")
-
-    connected = {r["source"] for r in relations} | {r["target"] for r in relations}
-    unreached = [t for t in names if t in graph and t not in connected]
+            lines.append(f"- {rel['source']} → {rel['target']} [{rel['cardinality']}] ON {rel['join_keys']}")
+            for alt in rel["alternatives"][1:]:
+                lines.append(f"    - or ON {alt}")
+        fan_out = [f"{r['source']} → {r['target']}" for r in relations if r["cardinality"] in ("1:n", "n:m")]
+        if fan_out:
+            lines.append(f"\nRow multiplication: {', '.join(fan_out)}. Aggregate before joining or use COUNT(DISTINCT …).")
     if unreached:
         lines.append(f"\nNo join path found to: {', '.join(unreached)}")
     if unknown:
@@ -378,6 +381,38 @@ def _writes_via_into(sql: str) -> bool:
     return bool(_INTO_RE.search(sql))
 
 
+def _unqualified_columns(statement) -> list:
+    """
+    Bare column names in a parsed statement (sqlparse), lowercased.
+
+    Skipped: qualified parts (x.col), function names (fn(...)), and aliases —
+    a name right after AS, ')', END or another name/literal (`count(*) n`,
+    `orders o`) is an alias, and later uses of it (ORDER BY n) are skipped too.
+    """
+    from sqlparse import tokens as T
+
+    toks = [t for t in statement.flatten() if not t.is_whitespace and t.ttype not in T.Comment]
+    aliases, candidates = set(), []
+    for i, tok in enumerate(toks):
+        if tok.ttype is not T.Name:
+            continue
+        prev = toks[i - 1] if i else None
+        nxt = toks[i + 1] if i + 1 < len(toks) else None
+        if nxt is not None and nxt.value in (".", "("):
+            continue
+        if prev is not None and prev.value == ".":
+            continue
+        name = tok.value.strip('`"[]').lower()
+        if prev is not None and (
+            prev.normalized in ("AS", "END") or prev.value == ")"
+            or prev.ttype is T.Name or prev.ttype in T.Literal
+        ):
+            aliases.add(name)
+            continue
+        candidates.append(name)
+    return [c for c in dict.fromkeys(candidates) if c not in aliases]
+
+
 class SQLCheck(TypedDict):
     valid: bool
     read_only: bool
@@ -395,9 +430,10 @@ def validate_sql(sql: str, instance: str = "default") -> SQLCheck:
 
     Reports whether it parses, whether every statement is read-only
     (SELECT / WITH … SELECT), any FROM/JOIN table that PolyQL doesn't know
-    (CTE names are ignored), and any qualified column (alias.column or
-    table.column) that doesn't exist on its table. Unqualified columns are not
-    checked, so qualify columns to get them checked. Does not run the query.
+    (CTE names are ignored), and any column that doesn't exist: qualified
+    columns (alias.column) against their table; bare columns against the
+    FROM/JOIN tables when every source is a known table (not a CTE or
+    subquery). Does not run the query.
     Returns {valid, read_only, statement_types, unknown_tables,
     unknown_columns, errors, warnings}.
     """
@@ -459,6 +495,21 @@ def validate_sql(sql: str, instance: str = "default") -> SQLCheck:
             ref = f"{qualifier}.{column}"
             if column not in columns and ref not in unknown_columns:
                 unknown_columns.append(ref)
+        # Bare columns: only judged when every FROM/JOIN source is a known table
+        # with column metadata (no CTEs, no subqueries), so a miss can't be a
+        # column that some other source provides.
+        if (len(statements) == 1 and refs and not ctes and not unknown
+                and not re.search(r"\(\s*SELECT\b", cleaned, re.IGNORECASE)):
+            source_columns = [
+                known_columns.get(t) or known_columns.get(by_short.get(t.rsplit(".", 1)[-1], ""))
+                for t in refs
+            ]
+            if all(source_columns):
+                available = set().union(*source_columns)
+                skip = set(aliases) | set(refs) | {r.rsplit(".", 1)[-1] for r in refs}
+                for column in _unqualified_columns(statements[0]):
+                    if column not in available and column not in skip and column not in unknown_columns:
+                        unknown_columns.append(column)
     if unknown_columns:
         errors.append(f"Unknown columns: {', '.join(unknown_columns)}.")
 

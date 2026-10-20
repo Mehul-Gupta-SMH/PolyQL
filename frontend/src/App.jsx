@@ -4,6 +4,7 @@ import LoginPage from './components/LoginPage.jsx'
 import ChatInterface from './components/ChatInterface.jsx'
 import SchemaERD from './components/SchemaERD.jsx'
 import IngestTable from './components/IngestTable.jsx'
+import KnowledgePanel from './components/KnowledgePanel.jsx'
 import DataLineage from './components/DataLineage.jsx'
 
 const tabStyle = (active) => ({
@@ -82,6 +83,7 @@ function AppContent() {
           <button style={tabStyle(activeTab === 'schema')}  onClick={() => setActiveTab('schema')}>Schema / ERD</button>
           <button style={tabStyle(activeTab === 'ingest')}  onClick={() => setActiveTab('ingest')}>Ingest Table</button>
           <button style={tabStyle(activeTab === 'lineage')} onClick={() => setActiveTab('lineage')}>Join Path</button>
+          <button style={tabStyle(activeTab === 'knowledge')} onClick={() => setActiveTab('knowledge')}>Knowledge</button>
         </nav>
 
         {/* User info + logout */}
@@ -107,6 +109,7 @@ function AppContent() {
         {activeTab === 'schema'  && <SchemaERD />}
         {activeTab === 'ingest'  && <IngestTable providers={providers} />}
         {activeTab === 'lineage' && <DataLineage tables={schemaTables} />}
+        {activeTab === 'knowledge' && <KnowledgePanel />}
       </div>
     </div>
   )

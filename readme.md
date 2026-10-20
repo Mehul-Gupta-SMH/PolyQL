@@ -58,7 +58,8 @@ Ask *"Which customers placed the most orders last quarter?"* and get a ready-to-
 | **Join Path explorer** | Select any two tables and instantly see the shortest JOIN route, with join keys and cardinality annotations |
 | **Derivative Tables** | See which tables were built from a source table via pipeline SQL, and which tables a derived table originates from |
 | **Qualified table names** | Full `database.schema.table` notation supported in pipeline ingestion — qualifiers are preserved through parsing and stored correctly |
-| **OKF knowledge bundles** | Import an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) bundle (`POST /api/okf/import`); table search adds the tables that matching concepts describe or link to — e.g. a *Revenue* metric that links to `orders` pulls in `orders` — and the matched concepts are added to the prompt as *Knowledge Notes* |
+| **Apache Ossie (OSI) import / export** | Import an [Ossie](https://ossie.apache.org/) semantic model (datasets → tables, relationships → join graph, metrics → glossary) or export an instance as Ossie YAML — from the **Knowledge** tab, or `POST /api/semantic/import/ossie`, `GET /api/semantic/export/ossie`. See [docs/ossie.md](docs/ossie.md) |
+| **OKF knowledge bundles** | Import an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) bundle (`POST /api/okf/import`); table search adds the tables that matching concepts describe or link to — e.g. a *Revenue* metric that links to `orders` pulls in `orders` — and the matched concepts are added to the prompt as *Knowledge Notes*. The **Knowledge** tab imports, lists and removes bundles (`GET`/`DELETE /api/okf/bundles`) and exports an instance's tables and glossary as an OKF bundle (`GET /api/okf/export`) |
 | **Business Semantic Layer** | Define business terms (KPIs, formulas, synonyms) in a glossary; terms are embedded and injected into the LLM prompt when semantically relevant — ensures canonical definitions are always used |
 | **Execution outcome tracking** | Every query run via the UI records a success / empty / failure verdict with latency and error details — powers the future validation layer |
 | **Benchmark evaluation** | BIRD and Spider text-to-SQL benchmark harness — ingest, run batch inference, compute EX and VES metrics per difficulty and per DB |
@@ -310,6 +311,26 @@ python -m benchmark.evaluate \
     --benchmark bird \
     --data_dir benchmark/bird_data/minidev/MINIDEV \
     --output_csv results/bird_mini_summary.csv
+```
+
+### Measuring what the context is worth
+
+Run the same questions with a context source switched off, evaluate both runs, and compare them question by question:
+
+```bash
+# --without accepts okf, glossary, evidence (comma-separated)
+python -m benchmark.run_inference ... --output_file results/bird_no_okf.jsonl --without okf
+python -m benchmark.evaluate --results_file results/bird_no_okf.jsonl --benchmark bird --data_dir ...
+
+# first file = baseline; prints EX/VES, ΔEX, questions won/lost and an exact McNemar p-value
+python -m benchmark.compare results/evaluated_bird_mini.jsonl results/evaluated_bird_no_okf.jsonl
+```
+
+To time the MCP server the way an agent harness starts it (fresh process over stdio → handshake → first `search_schema`, which loads the models → warm calls):
+
+```bash
+python -m benchmark.mcp_coldstart --instance bird_shop --question "orders per customer" --runs 5 \
+    --output_json results/mcp_coldstart.json
 ```
 
 ### Universal ingestion agent (any benchmark format)
