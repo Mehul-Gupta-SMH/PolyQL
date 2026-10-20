@@ -249,6 +249,24 @@ messages = [
 ]
 ```
 
+### Ablations and comparisons
+
+```
+4. Ablate    →  run_inference.py --without okf,glossary,evidence
+                okf      = OKFStore.search_concepts() returns [] (no OKF table hits, no Knowledge Notes)
+                glossary = main._get_business_context() returns [] (no Business Definitions)
+                evidence = BIRD evidence hint not injected
+                Each record stores "without"; resuming into a file from another ablation is refused
+
+5. Compare   →  benchmark/compare.py evaluated_a.jsonl evaluated_b.jsonl [...]
+                First file is the baseline; common question_ids only
+                EX / VES / median latency, won / lost question ids, exact McNemar p-value
+```
+
+`benchmark/mcp_coldstart.py` times the MCP server over stdio per fresh process: `initialize_ms`
+(spawn → handshake), `list_tools_ms`, `first_search_ms` (first `search_schema`, model loading),
+`warm_search_ms` (median of later calls) and `total_ms`; median/min/max over `--runs`.
+
 ### Universal ingestion agent (`benchmark/ingest_agent.py`)
 
 For benchmarks in formats other than BIRD/Spider, the LLM-powered ingestion agent auto-detects and handles any schema format:

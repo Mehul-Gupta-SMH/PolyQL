@@ -313,6 +313,26 @@ python -m benchmark.evaluate \
     --output_csv results/bird_mini_summary.csv
 ```
 
+### Measuring what the context is worth
+
+Run the same questions with a context source switched off, evaluate both runs, and compare them question by question:
+
+```bash
+# --without accepts okf, glossary, evidence (comma-separated)
+python -m benchmark.run_inference ... --output_file results/bird_no_okf.jsonl --without okf
+python -m benchmark.evaluate --results_file results/bird_no_okf.jsonl --benchmark bird --data_dir ...
+
+# first file = baseline; prints EX/VES, ΔEX, questions won/lost and an exact McNemar p-value
+python -m benchmark.compare results/evaluated_bird_mini.jsonl results/evaluated_bird_no_okf.jsonl
+```
+
+To time the MCP server the way an agent harness starts it (fresh process over stdio → handshake → first `search_schema`, which loads the models → warm calls):
+
+```bash
+python -m benchmark.mcp_coldstart --instance bird_shop --question "orders per customer" --runs 5 \
+    --output_json results/mcp_coldstart.json
+```
+
 ### Universal ingestion agent (any benchmark format)
 
 For benchmarks in formats other than BIRD/Spider, use the LLM-powered ingestion agent — it auto-detects the schema format (tables.json, SQL CREATE TABLE files, CSV metadata, custom JSON/YAML):
