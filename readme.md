@@ -60,7 +60,7 @@ Ask *"Which customers placed the most orders last quarter?"* and get a ready-to-
 | **Qualified table names** | Full `database.schema.table` notation supported in pipeline ingestion — qualifiers are preserved through parsing and stored correctly |
 | **Apache Ossie (OSI) import / export** | Import an [Ossie](https://ossie.apache.org/) semantic model (datasets → tables, relationships → join graph, metrics → glossary) or export an instance as Ossie YAML — from the **Knowledge** tab, or `POST /api/semantic/import/ossie`, `GET /api/semantic/export/ossie`. See [docs/ossie.md](docs/ossie.md) |
 | **OKF knowledge bundles** | Import an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) bundle (`POST /api/okf/import`); table search adds the tables that matching concepts describe or link to — e.g. a *Revenue* metric that links to `orders` pulls in `orders` — and the matched concepts are added to the prompt as *Knowledge Notes*. The **Knowledge** tab imports, lists and removes bundles (`GET`/`DELETE /api/okf/bundles`) and exports an instance's tables and glossary as an OKF bundle (`GET /api/okf/export`) |
-| **Business Semantic Layer** | Define business terms (KPIs, formulas, synonyms) in a glossary; terms are embedded and injected into the LLM prompt when semantically relevant — ensures canonical definitions are always used |
+| **Business Semantic Layer** | Define business terms (KPIs, formulas, synonyms) in the **Glossary** tab — add, edit, search, bulk-import CSV/JSON; terms are embedded and injected into the LLM prompt when semantically relevant — ensures canonical definitions are always used |
 | **Execution outcome tracking** | Every query run via the UI records a success / empty / failure verdict with latency and error details — powers the future validation layer |
 | **Benchmark evaluation** | BIRD and Spider text-to-SQL benchmark harness — ingest, run batch inference, compute EX and VES metrics per difficulty and per DB |
 | **Use from your agent (MCP)** | `python backend/mcp_server.py` exposes table search, join paths, glossary, OKF notes and SQL validation as MCP tools for Claude Code, Codex and agent frameworks — the agent writes the SQL, no extra API key. See [docs/mcp.md](docs/mcp.md) |
@@ -214,11 +214,12 @@ The **Sign in with Google** button appears on the login page automatically when 
 
 ## Business Semantic Layer
 
-Add business definitions that get automatically injected into the LLM context when relevant:
+Add business definitions that get automatically injected into the LLM context when relevant. The **Glossary** tab lists, searches, adds, edits and deletes terms, and imports a CSV (header row with `term_name`, `definition`, `formula`, `table_deps`, `synonyms`, …; list values separated by `;`) or a JSON array — re-importing the same file updates terms by name instead of duplicating them. Or use the REST API (authenticated):
 
 ```bash
 # Add a term via REST API
 curl -X POST http://localhost:8000/api/glossary/terms/single \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "term_name": "ARR",
@@ -230,7 +231,7 @@ curl -X POST http://localhost:8000/api/glossary/terms/single \
   }'
 ```
 
-Terms are embedded into ChromaDB. When a user asks about "ARR" or "recurring revenue", the matching terms are prepended to the schema section so the LLM uses the canonical formula.
+Every create, update and import embeds the term into ChromaDB (deletes remove the embedding). When a user asks about "ARR" or "recurring revenue", the matching terms are prepended to the schema section so the LLM uses the canonical formula. Terms with a blank instance are used for default-instance queries; set `instance_name` to scope a term to one database. If the embedding model can't load, the term is still saved and the response says `"indexed": false` — run **Re-index** (`POST /api/glossary/reindex`) once it is available.
 
 ---
 

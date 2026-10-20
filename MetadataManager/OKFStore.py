@@ -254,6 +254,7 @@ def import_bundle(
         dict: {bundle, indexed, skipped, deprecated, table_concepts}
     """
     from MetadataManager.MetadataStore.vdb.Chroma import addData
+    from MetadataManager.retrieval_cache import clear as clear_retrieval_cache
 
     concepts, skipped = load_bundle(bundle_path)
     by_id = {c["concept_id"]: c for c in concepts}
@@ -285,9 +286,12 @@ def import_bundle(
             )),
         })
 
-    delete_bundle(chroma_client, instance_name, bundle_name)
-    if data:
-        addData(chroma_client, data, {"collection_name": _COLLECTION, "sim_metric": "cosine"})
+    try:
+        delete_bundle(chroma_client, instance_name, bundle_name)
+        if data:
+            addData(chroma_client, data, {"collection_name": _COLLECTION, "sim_metric": "cosine"})
+    finally:
+        clear_retrieval_cache()  # concepts feed table search and the prompt
 
     logger.info(
         "OKFStore: imported %s into instance %r — %d indexed, %d skipped, %d deprecated",
@@ -443,6 +447,8 @@ def delete_bundle(chroma_client, instance_name: str, bundle: str | None = None) 
     Remove an instance's imported concepts — one bundle, or all of them when
     *bundle* is None. Returns the number of concepts removed.
     """
+    from MetadataManager.retrieval_cache import clear as clear_retrieval_cache
+
     collection = _collection(chroma_client)
     if collection is None:
         return 0
@@ -453,6 +459,7 @@ def delete_bundle(chroma_client, instance_name: str, bundle: str | None = None) 
     ]
     if ids:
         collection.delete(ids=ids)
+        clear_retrieval_cache()
     return len(ids)
 
 

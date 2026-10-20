@@ -1,4 +1,5 @@
 from .relationdb import networkxDB, kuzuDB
+from MetadataManager.retrieval_cache import clear as clear_retrieval_cache
 
 _BACKENDS = {
     "kuzu":    kuzuDB,
@@ -45,7 +46,10 @@ class Relations:
         """
         self.__instGraphObj__()
         iname = instance_name if instance_name is not None else self.instance_name
-        self._backend.addRelations(self.GraphObj, edges, iname)
+        try:
+            self._backend.addRelations(self.GraphObj, edges, iname)
+        finally:
+            clear_retrieval_cache()  # join keys feed the cached schema context
 
     def getRelation(self, target_nodes=[], instance_name: str = None, unique_columns: set = None):
         """

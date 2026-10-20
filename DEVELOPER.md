@@ -185,12 +185,13 @@ PromptBuilder.format_schema()
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/glossary/terms/single` | Add one term |
-| `POST` | `/api/glossary/terms/bulk` | Add multiple terms (JSON array) |
+| `POST` | `/api/glossary/terms/bulk` | Add multiple terms (JSON array; `?upsert=true` updates by name) |
 | `GET` | `/api/glossary/terms` | List all terms |
 | `GET` | `/api/glossary/terms/{id}` | Get term by ID |
 | `PUT` | `/api/glossary/terms/{id}` | Update term |
 | `DELETE` | `/api/glossary/terms/{id}` | Delete term |
 | `GET` | `/api/glossary/search?q=` | Lexical search by name |
+| `POST` | `/api/glossary/reindex` | Re-embed every term (`?instance_name=`) |
 
 ### Term schema
 
@@ -428,12 +429,13 @@ prompt = PromptBuilder('my_prompt').build({'SCHEMA': schema_str, 'QUESTION': use
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/glossary/terms/single` | Add one business term |
-| `POST` | `/api/glossary/terms/bulk` | Bulk import terms (JSON array) |
+| `POST` | `/api/glossary/terms/bulk` | Bulk import terms (JSON array; `?upsert=true` updates by name) |
 | `GET` | `/api/glossary/terms` | List all terms |
 | `GET` | `/api/glossary/terms/{id}` | Get term by ID |
 | `PUT` | `/api/glossary/terms/{id}` | Update term |
 | `DELETE` | `/api/glossary/terms/{id}` | Delete term |
 | `GET` | `/api/glossary/search?q=` | Lexical search by term name |
+| `POST` | `/api/glossary/reindex` | Re-embed every term (`?instance_name=`) |
 
 ---
 

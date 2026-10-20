@@ -52,6 +52,11 @@ _COLLECTION = "business_glossary"
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _invalidate_retrieval_cache() -> None:
+    from MetadataManager.retrieval_cache import clear
+    clear()
+
+
 def _get_db():
     """Open the shared tableMetadata.db and ensure business_terms table exists."""
     from Utilities.base_utils import accessDB, get_config_val
@@ -115,6 +120,7 @@ def add_term(term: dict) -> str:
     record["updated_at"] = now
 
     db.post_data("business_terms", [record])
+    _invalidate_retrieval_cache()
     logger.info("GlossaryStore: added term %r (id=%s)", term.get("term_name"), term_id)
     return term_id
 
@@ -155,6 +161,7 @@ def update_term(term_id: str, updates: dict) -> bool:
             payload[k] = str(v) if v is not None else ""
     payload["updated_at"] = _now()
     db.update_data("business_terms", {"term_id": term_id}, payload)
+    _invalidate_retrieval_cache()
     logger.info("GlossaryStore: updated term id=%s fields=%s", term_id, list(payload.keys()))
     return True
 
@@ -163,6 +170,7 @@ def delete_term(term_id: str) -> None:
     """Delete a term by ID."""
     db = _get_db()
     db.delete_data("business_terms", {"term_id": term_id})
+    _invalidate_retrieval_cache()
     logger.info("GlossaryStore: deleted term id=%s", term_id)
 
 
@@ -246,7 +254,7 @@ def index_term(term: dict, embedding_model, chroma_client) -> None:
         return
 
     embedding = embedding_model.encode(document).tolist()
-    chroma_id = str(uuid.uuid3(uuid.NAMESPACE_DNS, term["term_id"]))
+    chroma_id = _chroma_id(term["term_id"])
 
     data = [
         {
@@ -262,7 +270,22 @@ def index_term(term: dict, embedding_model, chroma_client) -> None:
         }
     ]
     addData(chroma_client, data, {"collection_name": _COLLECTION, "sim_metric": "cosine"})
+    _invalidate_retrieval_cache()
     logger.debug("GlossaryStore: indexed term %r into %s", term.get("term_name"), _COLLECTION)
+
+
+def _chroma_id(term_id: str) -> str:
+    return str(uuid.uuid3(uuid.NAMESPACE_DNS, term_id))
+
+
+def unindex_term(term_id: str, chroma_client) -> None:
+    """Remove a term's embedding from the 'business_glossary' collection (no-op if absent)."""
+    try:
+        collection = chroma_client.get_collection(name=_COLLECTION)
+    except Exception:
+        return  # nothing indexed yet
+    collection.delete(ids=[_chroma_id(term_id)])
+    _invalidate_retrieval_cache()
 
 
 def get_business_context(
@@ -282,15 +305,13 @@ def get_business_context(
     """
     try:
         from Utilities.base_utils import get_config_val
-        from sentence_transformers import SentenceTransformer
-        from MetadataManager.MetadataStore.vdb.Chroma import getclient, getData
+        from MetadataManager.MetadataStore.shared_models import get_chroma_client, get_embedding_model
+        from MetadataManager.MetadataStore.vdb.Chroma import getData
 
         vectordb_cfg = get_config_val("retrieval_config", ["vectordb"], True)
-        models_repo  = get_config_val("retrieval_config", ["models_repo"], True)
-        indexing_cfg = get_config_val("retrieval_config", ["indexing"], True)
 
-        client = getclient({"path": vectordb_cfg["path"]}, session_type="local")
-        model  = SentenceTransformer(models_repo["path"] + "/" + indexing_cfg["model"])
+        client = get_chroma_client(vectordb_cfg["path"])
+        model  = get_embedding_model()
 
         query_emb = model.encode(query).tolist()
         vdb_meta  = {"collection_name": _COLLECTION, "n_chunks": top_k}

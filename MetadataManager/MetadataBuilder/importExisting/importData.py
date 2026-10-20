@@ -4,6 +4,7 @@ import jsonschema
 import json
 from Utilities.base_utils import accessDB
 from MetadataManager.MetadataStore.RAGPipeline import ManageInformation
+from MetadataManager.retrieval_cache import clear as clear_retrieval_cache
 
 logger = logging.getLogger(__name__)
 
@@ -171,8 +172,11 @@ class importDD:
         # print(tableCol)
 
         try:
-            self.DBObj.post_data(self.tableDescName, tableDesc)
-            self.DBObj.post_data(self.tableColName, tableCol)
+            try:
+                self.DBObj.post_data(self.tableDescName, tableDesc)
+                self.DBObj.post_data(self.tableColName, tableCol)
+            finally:
+                clear_retrieval_cache()
 
 
             tableMD = {

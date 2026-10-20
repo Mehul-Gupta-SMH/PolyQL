@@ -278,6 +278,7 @@ def store_table(
     from MetadataManager.MetadataBuilder.importExisting.importData import importDD
     from MetadataManager.MetadataStore.RAGPipeline import ManageInformation
     from MetadataManager.MetadataStore.ManageRelations import Relations
+    from MetadataManager.retrieval_cache import clear as clear_retrieval_cache
 
     vdb_metadata = {
         "collection_name": "tableScan",
@@ -320,6 +321,7 @@ def store_table(
         for col in columns
     ]
     db.post_data("tableColMetadata", records)
+    clear_retrieval_cache()  # also below, once the graph is written
 
     # 2. ChromaDB -------------------------------------------------------------
     if vdb is None:
@@ -347,5 +349,6 @@ def store_table(
         ]
         rel_mgr.addRelation(edges)
 
+    clear_retrieval_cache()
     logger.info("Stored table '%s' (instance=%s, db_type=%s) with %d columns and %d relationships.",
                 table_name, instance_name, db_type, len(columns), len(relationships))
