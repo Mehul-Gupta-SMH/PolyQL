@@ -53,6 +53,11 @@ graph-db = [
     "kuzu>=0.3",
 ]
 
+mcp = [
+    # MCP server for agent harnesses (backend/mcp_server.py)
+    "mcp>=2.2,<3",
+]
+
 benchmark = [
     # LLM-powered universal ingestion agent (benchmark/ingest_agent.py)
     "anthropic>=0.21",   # already in core deps; listed here for clarity

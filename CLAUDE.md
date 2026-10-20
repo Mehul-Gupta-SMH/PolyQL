@@ -25,6 +25,7 @@ Guidelines and context for AI-assisted development on this project.
 - Business logic: `main.py` (`gatherRequirements`, `generateQuery`, `generate_pipeline_dict`)
 - Balance checks: `backend/balance.py` — concurrent, one checker per provider
 - Run: `uvicorn backend.app:app --reload` from project root
+- MCP server (context mode): `python -m backend.mcp_server` (stdio) or `--transport streamable-http` — tools are read-only and never call an LLM; see `docs/mcp.md`. Uses MCP SDK v2 (`from mcp.server.mcpserver import MCPServer`; v1 `FastMCP` no longer exists)
 
 ## Frontend
 
@@ -110,3 +111,4 @@ Guidelines and context for AI-assisted development on this project.
 | 2026-10-18 | `MetadataManager/MetadataStore/relationdb/kuzuDB.py`, `networkxDB.py`, `tests/test_kuzu.py` | #30: `getRelations` skips unreachable pairs instead of aborting; role-playing joins preserved via `JoinKeysAlternatives` edge attribute; 3 new tests (250 total) |
 | 2026-10-18 | `MetadataManager/OKFStore.py`, `SQLBuilderComponents.py`, `backend/okf.py`, `Utilities/retrieval_config.YAML`, `tests/test_okf_store.py` | #30: OKF bundle import + `okf_concepts` collection; table search adds tables that matching concepts describe or link to (`__addOKFTables__`); `POST /api/okf/import`; 24 new tests (274 total) |
 | 2026-10-18 | `MetadataManager/OKFStore.py`, `SQLBuilderComponents.py`, `APIManager/PromptBuilder.py`, `Utilities/retrieval_config.YAML`, `tests/test_okf_store.py` | #30: matched OKF concepts rendered as `## Knowledge Notes` in `format_schema()`; `search_concepts()` + `tables_from_concepts()`; `okf_hits` in context; `okf.include_in_prompt` / `prompt_chars`; 9 new tests (283 total) |
+| 2026-10-19 | `backend/mcp_server.py`, `APIManager/PromptBuilder.py`, `docs/mcp.md`, `requirements-ci.txt`, `pyproject.toml`, `tests/test_mcp_server.py` | #30: MCP server (context mode) — 7 read-only tools + `write_sql` prompt; `format_business_definitions()` factored out; 26 new tests (309 total) |

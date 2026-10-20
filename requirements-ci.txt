@@ -14,3 +14,4 @@ requests>=2.28
 python-multipart>=0.0.9
 kuzu>=0.6
 PyJWT>=2.8
+mcp>=2.2,<3        # backend/mcp_server.py (MCP SDK v2: MCPServer)

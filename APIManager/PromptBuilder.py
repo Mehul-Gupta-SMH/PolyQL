@@ -82,6 +82,53 @@ class PromptBuilder:
         return prompt_template_str
 
     @staticmethod
+    def format_business_definitions(glossary_hits: list) -> list:
+        """
+        Render glossary hits (from GlossaryStore.get_business_context) as the
+        ## Business Definitions block. Returns a list of lines; empty when there
+        are no hits.
+        """
+        lines = []
+        if not glossary_hits:
+            return lines
+        lines.append("## Business Definitions")
+        lines.append(
+            "The following business terms are relevant to this query. "
+            "Use their formulas as the canonical definition — do not derive your own."
+        )
+        lines.append("")
+        for hit in glossary_hits:
+            term_name = hit.get("term_name") or ""
+            full_name = hit.get("full_name") or ""
+            header = f"### {term_name}"
+            if full_name:
+                header += f" ({full_name})"
+            lines.append(header)
+
+            if hit.get("definition"):
+                lines.append(f"> {hit['definition']}")
+
+            if hit.get("formula"):
+                ftype = hit.get("formula_type") or "expression"
+                lines.append(f"**Formula ({ftype}):** `{hit['formula']}`")
+
+            deps = hit.get("table_deps") or []
+            if isinstance(deps, str):
+                try:
+                    import json as _json
+                    deps = _json.loads(deps)
+                except Exception:
+                    deps = []
+            if deps:
+                lines.append(f"**Table dependencies:** {', '.join(deps)}")
+
+            if hit.get("example_value"):
+                lines.append(f"**Example:** {hit['example_value']}")
+
+            lines.append("")
+        return lines
+
+    @staticmethod
     def format_schema(context: dict) -> str:
         """
         Format the context dict returned by SQLBuilderSupport.getBuildComponents()
@@ -104,43 +151,7 @@ class PromptBuilder:
         lines.append("")
 
         # SL2: inject business glossary hits before the schema block
-        glossary_hits = context.get("glossary_hits") or []
-        if glossary_hits:
-            lines.append("## Business Definitions")
-            lines.append(
-                "The following business terms are relevant to this query. "
-                "Use their formulas as the canonical definition — do not derive your own."
-            )
-            lines.append("")
-            for hit in glossary_hits:
-                term_name = hit.get("term_name") or ""
-                full_name = hit.get("full_name") or ""
-                header = f"### {term_name}"
-                if full_name:
-                    header += f" ({full_name})"
-                lines.append(header)
-
-                if hit.get("definition"):
-                    lines.append(f"> {hit['definition']}")
-
-                if hit.get("formula"):
-                    ftype = hit.get("formula_type") or "expression"
-                    lines.append(f"**Formula ({ftype}):** `{hit['formula']}`")
-
-                deps = hit.get("table_deps") or []
-                if isinstance(deps, str):
-                    try:
-                        import json as _json
-                        deps = _json.loads(deps)
-                    except Exception:
-                        deps = []
-                if deps:
-                    lines.append(f"**Table dependencies:** {', '.join(deps)}")
-
-                if hit.get("example_value"):
-                    lines.append(f"**Example:** {hit['example_value']}")
-
-                lines.append("")
+        lines.extend(PromptBuilder.format_business_definitions(context.get("glossary_hits") or []))
 
         # OKF: curated knowledge concepts matched during table search
         okf_hits = context.get("okf_hits") or []
