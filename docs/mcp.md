@@ -2,7 +2,7 @@
 
 `backend/mcp_server.py` runs Poly-QL as an [MCP](https://modelcontextprotocol.io/) server, so Claude Code, Codex and other agent frameworks can use its schema knowledge as tools.
 
-It runs in **context mode**. The tools return schema context, and your agent writes the SQL itself. The tools never call an LLM, so the server needs no API key and you don't pay for two models. Every tool is read-only, and Poly-QL never executes queries through MCP.
+By default it runs in **context mode**. The tools return schema context, and your agent writes the SQL itself. No default tool calls an LLM, so the server needs no API key and you don't pay for two models. Two tools are opt-in: `execute_sql` runs read-only queries once you configure a connection, and `generate_sql` uses Poly-QL's own LLM pipeline when you pass `--enable-generate`.
 
 ## Tools
 
@@ -14,9 +14,23 @@ It runs in **context mode**. The tools return schema context, and your agent wri
 | `get_table_schema(table, instance)` | Full column metadata for one table, including source expressions for pipeline-derived tables |
 | `find_join_path(tables, instance)` | Each join hop with its condition and cardinality (`1:1`, `1:n`, `n:1`, `n:m`). Lists every alternative when two tables can be joined more than one way, and reports tables that can't be connected |
 | `get_business_terms(question, instance)` | Glossary definitions and canonical formulas |
-| `validate_sql(sql, instance)` | `{valid, read_only, statement_types, unknown_tables, errors, warnings}`. Checks that the SQL parses, that every statement is read-only, and that FROM/JOIN tables are known. It doesn't run the query or check columns |
+| `validate_sql(sql, instance)` | `{valid, read_only, statement_types, unknown_tables, unknown_columns, errors, warnings}`. Checks that the SQL parses, that every statement is read-only, that FROM/JOIN tables are known, and that qualified columns (`alias.column`, `table.column`) exist on their table. Unqualified columns, and columns of CTEs or subqueries, aren't checked. It doesn't run the query |
+| `get_lineage(table, instance)` | The tables connected to a table in the graph, with join keys |
+| `get_derivatives(table, instance)` | Pipeline lineage: which tables a derived table is built from, and which tables are derived from it |
+| `execute_sql(sql, instance, max_rows, question)` | **Opt-in.** Runs one read-only `SELECT` and returns `{columns, rows, row_count, truncated, latency_ms, enforced, error}`. See [Running queries](#running-queries-execute_sql) |
+| `generate_sql(question, provider, instance, query_type, model)` | **Opt-in, calls an LLM.** Poly-QL's own generation pipeline. See [Generate mode](#generate-mode-generate_sql) |
 
-The prompt `write_sql(question, instance, dialect)` gives the agent the recommended workflow: `search_schema` → (`get_table_schema` / `find_join_path`) → write → `validate_sql`.
+### Resources
+
+Clients that support MCP resources can attach these as context:
+
+| URI | Content |
+|---|---|
+| `polyql://tables/{instance}` | Table list with descriptions |
+| `polyql://schema/{instance}/{table}` | Full column metadata for one table |
+| `polyql://glossary/{term}` | One glossary term with its formula |
+
+The prompt `write_sql(question, instance, dialect)` gives the agent the recommended workflow: `search_schema` → (`get_table_schema` / `find_join_path`) → write → `validate_sql` → (`execute_sql`, if configured).
 
 ## Install
 
@@ -24,7 +38,7 @@ The prompt `write_sql(question, instance, dialect)` gives the agent the recommen
 pip install "mcp>=2.2,<3"        # or: pip install .[mcp]
 ```
 
-The server uses the same metadata stores and `Utilities/retrieval_config.YAML` as the web app, so ingest tables first. Without metadata, the listing tools say so, and `validate_sql` skips the unknown-table check.
+The server uses the same metadata stores and `Utilities/retrieval_config.YAML` as the web app, so ingest tables first. Without metadata, the listing tools say so, and `validate_sql` skips the table and column checks with a warning.
 
 The embedding model, reranker and ChromaDB load on the first `search_schema` or `get_business_terms` call, not at start-up. Expect the first call to be slow.
 
@@ -62,12 +76,59 @@ args = ["/path/to/PolyQL/backend/mcp_server.py"]
 ## Over HTTP (shared or remote agents)
 
 ```bash
+export POLYQL_MCP_TOKEN="$(openssl rand -hex 32)"
 python -m backend.mcp_server --transport streamable-http --port 8765
 # endpoint: http://127.0.0.1:8765/mcp
-claude mcp add --transport http polyql http://127.0.0.1:8765/mcp
+claude mcp add --transport http polyql http://127.0.0.1:8765/mcp \
+  --header "Authorization: Bearer $POLYQL_MCP_TOKEN"
 ```
 
-> **No authentication.** The HTTP server binds to `127.0.0.1` by default and has no auth. Don't pass `--host 0.0.0.0` unless something in front of it handles authentication.
+**Authentication.** Requests must send `Authorization: Bearer <token>` when either of these is set:
+
+- `POLYQL_MCP_TOKEN`: a shared secret, compared in constant time.
+- `JWT_SECRET`: also accept Poly-QL login tokens from `POST /auth/login`. The web app must run with the same `JWT_SECRET`; otherwise each process generates its own random secret and the tokens won't match.
+
+Without either, the server runs with no authentication and logs a warning. That's only allowed on `127.0.0.1`, `localhost` or `::1`. For any other `--host` the server refuses to start unless authentication is configured, or you pass `--insecure-no-auth` explicitly.
+
+## Running queries (`execute_sql`)
+
+`execute_sql` only works when the operator configures a connection through environment variables. An agent can never pass a connection string itself:
+
+```bash
+export POLYQL_MCP_DB_SALES="postgresql://readonly_user:...@db/sales"   # instance "sales"
+export POLYQL_MCP_DB="sqlite:////data/warehouse.db"                    # fallback for any instance
+export POLYQL_MCP_MAX_ROWS=1000     # server cap on rows returned (default 1000)
+export POLYQL_MCP_TIMEOUT_S=30      # statement timeout in seconds (default 30)
+```
+
+The instance name is upper-cased, with non-alphanumeric characters turned into `_`, so `sales-eu` becomes `POLYQL_MCP_DB_SALES_EU`.
+
+Safeguards:
+
+- **Before connecting**, the SQL must be exactly one statement, and `sqlparse` must classify it as a `SELECT`. `WITH … DELETE` is rejected, and so is `SELECT … INTO`, which writes a table in PostgreSQL or a file with MySQL's `INTO OUTFILE`.
+- **Always rolled back.** The transaction is never committed.
+- **Per-database protections**, listed in the result's `enforced` field:
+
+  | Database | Read-only | Timeout |
+  |---|---|---|
+  | PostgreSQL | `SET TRANSACTION READ ONLY` | `statement_timeout` |
+  | MySQL / MariaDB | (rollback only) | `max_execution_time`, which only applies to `SELECT` |
+  | SQLite | `PRAGMA query_only` | Interrupted via a progress handler |
+  | Others | (rollback only) | Not enforced |
+
+- **Row cap:** results are limited to `max_rows`, which can't exceed `POLYQL_MCP_MAX_ROWS`. `truncated` tells you whether more rows existed.
+- **No credentials in errors:** the connection string and any `user:password@` are removed from error messages.
+- **Recorded:** every run is logged to the outcome store (`validation/outcome_store`) with `provider="mcp"` and the optional `question`.
+
+> **Use a database user with read-only grants.** The checks above are layers of defence, not a substitute for database permissions.
+
+## Generate mode (`generate_sql`)
+
+```bash
+python -m backend.mcp_server --enable-generate      # or POLYQL_MCP_ENABLE_GENERATE=1
+```
+
+This adds `generate_sql`, which runs Poly-QL's full pipeline (adaptive retrieval and the LLM call) with the provider and API key from Poly-QL's config. It costs tokens. It's useful for clients without a capable model, or for comparing Poly-QL's output with your agent's. The result is `{type, content, error}`, where `type` is `sql`, `code` or `clarify`; for `clarify`, `content` is Poly-QL's question. Avoid `provider="claude_code"` from inside Claude Code, because it starts a nested Claude Code session.
 
 ## Agent frameworks
 
@@ -112,9 +173,8 @@ tools = await client.get_tools()
 
 ## Not yet available
 
-- `execute_sql`: running read-only queries with row and time limits, recorded in the outcome store
-- `generate_sql`: generate mode, which runs Poly-QL's own LLM pipeline for clients without a model
-- Authentication on the HTTP transport
-- Resources (`polyql://schema/{instance}/{table}`)
+- Column checks for unqualified columns and for CTE or subquery columns in `validate_sql`
+- Read-only enforcement beyond rollback on MySQL and other databases
+- Measured cold-start time on a full install
 
 These are tracked in [#30](https://github.com/Mehul-Gupta-SMH/PolyQL/issues/30), section 5.
