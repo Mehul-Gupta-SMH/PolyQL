@@ -12,8 +12,8 @@ PolyQL's metadata:
   relationship (from = many,    fk edge in the Kuzu join graph,
     to = one, from/to_columns)  join keys "from.c1 = to.k1, from.c2 = to.k2"
   metric (expression)           business glossary term (formula, table deps)
-  ai_context (synonyms,         folded into descriptions / glossary synonyms
-    instructions)
+  ai_context (synonyms,         folded into descriptions / glossary synonyms;
+    instructions)               a model's own ai_context becomes an OKF note
 
 Both the current draft (one model per document, `datasets` at the root) and
 the 0.1.x `semantic_model:` list wrapper are accepted on import. Export writes
@@ -133,10 +133,12 @@ def model_to_polyql(model: dict) -> dict:
     """
     Map one semantic model to PolyQL records.
 
-    Returns {name, tables, relationships, terms, skipped}:
+    Returns {name, tables, relationships, terms, notes, skipped}:
       tables         [{name, desc, columns: [{name, type, constraints, desc}]}]
       relationships  [{source, target, join_keys, kind: "fk"}]
       terms          glossary term dicts (term_name, definition, formula, ...)
+      notes          OKF concept dicts (model-level ai_context → one `note` concept
+                     attached to the model's tables)
       skipped        human-readable notes for anything not imported
     """
     skipped = []
@@ -233,17 +235,34 @@ def model_to_polyql(model: dict) -> dict:
             "domain": str(model.get("name") or ""),
         })
 
-    if model.get("ai_context"):
-        skipped.append(
-            "model-level ai_context (not mapped; add it as an OKF knowledge note if needed)"
-        )
+    model_name = str(model.get("name") or "")
+    notes = []
+    instructions, synonyms = ai_context(model.get("ai_context"))
+    if instructions or synonyms:
+        body = instructions
+        if synonyms:
+            body = (body + "\n\n" if body else "") + f"Synonyms: {', '.join(synonyms)}."
+        notes.append({
+            "concept_id": f"ossie/{model_name or 'model'}",
+            "type": "note",
+            "title": f"{model_name or 'Model'} — guidance",
+            "description": "",
+            "resource": "",
+            "tags": ["ossie"],
+            "status": "stable",
+            "table_name": "",
+            "body": body,
+            "links": [],
+            # Honoured by OKFStore.concept_table_candidates: the note applies to every table
+            "tables": [t["name"] for t in tables],
+        })
 
-    return {"name": str(model.get("name") or ""), "tables": tables,
-            "relationships": relationships, "terms": terms, "skipped": skipped}
+    return {"name": model_name, "tables": tables, "relationships": relationships,
+            "terms": terms, "notes": notes, "skipped": skipped}
 
 
 def import_into_polyql(text: str, instance_name: str = "default", db_type: str = "generic",
-                       vdb=None, glossary_index=None) -> dict:
+                       vdb=None, glossary_index=None, okf_index=None) -> dict:
     """
     Import an Ossie document into PolyQL's stores.
 
@@ -252,13 +271,19 @@ def import_into_polyql(text: str, instance_name: str = "default", db_type: str =
     are upserted into the glossary by name and, when *glossary_index*
     (term → None, e.g. a closure over index_term) is given, embedded for search.
 
-    Returns {models, tables, relationships, metrics, skipped}.
+    A model's top-level ai_context becomes an OKF knowledge note. When
+    *okf_index* (callable(notes, bundle_name), e.g. a closure over
+    OKFStore.index_concepts) is given it is called with bundle `ossie:<model>`
+    (re-importing replaces it); otherwise the note is reported in `skipped`.
+
+    Returns {models, tables, relationships, metrics, notes, skipped}.
     """
     from backend.ingestion import store_table
     from MetadataManager import GlossaryStore
     from MetadataManager.MetadataStore.ManageRelations import Relations
 
-    summary = {"models": [], "tables": 0, "relationships": 0, "metrics": 0, "skipped": []}
+    summary = {"models": [], "tables": 0, "relationships": 0, "metrics": 0, "notes": 0,
+               "skipped": []}
     for model in load_models(text):
         mapped = model_to_polyql(model)
         summary["models"].append(mapped["name"])
@@ -288,6 +313,15 @@ def import_into_polyql(text: str, instance_name: str = "default", db_type: str =
             if glossary_index is not None:
                 glossary_index(GlossaryStore.get_term(term_id))
         summary["metrics"] += len(mapped["terms"])
+
+        if okf_index is not None:
+            # Called even without notes, so a re-import drops a removed ai_context
+            okf_index(mapped["notes"], f"ossie:{mapped['name']}")
+            summary["notes"] += len(mapped["notes"])
+        elif mapped["notes"]:
+            summary["skipped"].append(
+                f"model {mapped['name']}: ai_context not imported (no OKF index available)"
+            )
 
     logger.info("Ossie import into %r: %d tables, %d relationships, %d metrics", instance_name,
                 summary["tables"], summary["relationships"], summary["metrics"])

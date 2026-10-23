@@ -193,7 +193,7 @@ function OssieSection({ instance }) {
     if (!res.ok) throw new Error(await errorText(res))
     const r = await res.json()
     return `Imported ${r.models?.length ?? 0} model(s): ${r.tables} tables, ${r.relationships} relationships, ` +
-      `${r.metrics} metrics${r.skipped?.length ? `, ${r.skipped.length} skipped` : ''}.`
+      `${r.metrics} metrics${r.notes ? `, ${r.notes} notes` : ''}${r.skipped?.length ? `, ${r.skipped.length} skipped` : ''}.`
   })
 
   const exportModel = () => run(async () => {

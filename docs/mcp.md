@@ -14,7 +14,7 @@ By default it runs in **context mode**. The tools return schema context, and you
 | `get_table_schema(table, instance)` | Full column metadata for one table, including source expressions for pipeline-derived tables |
 | `find_join_path(tables, instance)` | Each join hop with its condition and cardinality (`1:1`, `1:n`, `n:1`, `n:m`). Lists every alternative when two tables can be joined more than one way, and reports tables that can't be connected |
 | `get_business_terms(question, instance)` | Glossary definitions and canonical formulas |
-| `validate_sql(sql, instance)` | `{valid, read_only, statement_types, unknown_tables, unknown_columns, errors, warnings}`. Checks that the SQL parses, that every statement is read-only, that FROM/JOIN tables are known, and that columns exist. Qualified columns (`alias.column`) are checked against their table. Bare columns are checked against the FROM/JOIN tables when every source is a known table, not a CTE or subquery. Aliases, functions and keywords are skipped. It doesn't run the query |
+| `validate_sql(sql, instance)` | `{valid, read_only, statement_types, unknown_tables, unknown_columns, errors, warnings}`. Checks that the SQL parses, that every statement is read-only, that FROM/JOIN tables are known, and that columns exist. Qualified columns (`alias.column`) are checked against their table. Bare columns are checked against the FROM/JOIN sources when every source's columns are known. Each SELECT block is checked on its own: CTE bodies, derived tables, UNION branches, and EXISTS/IN/scalar subqueries (which may also use the enclosing query's tables). A CTE or derived table counts as a source with its output columns (`AS` names, plain columns, or an explicit `name(a, b)` list); when those can't be told (`*`, an unaliased expression) checks that depend on it are skipped, so nothing is reported unless it is certainly missing. Aliases, functions and keywords are skipped. It doesn't run the query |
 | `get_lineage(table, instance)` | The tables connected to a table in the graph, with join keys |
 | `get_derivatives(table, instance)` | Pipeline lineage: which tables a derived table is built from, and which tables are derived from it |
 | `execute_sql(sql, instance, max_rows, question)` | **Opt-in.** Runs one read-only `SELECT` and returns `{columns, rows, row_count, truncated, latency_ms, enforced, error}`. See [Running queries](#running-queries-execute_sql) |
@@ -183,7 +183,6 @@ tools = await client.get_tools()
 
 ## Not yet available
 
-- Column checks inside CTEs and subqueries in `validate_sql`
 - Read-only enforcement beyond rollback on databases other than PostgreSQL, MySQL/MariaDB and SQLite
 - Measured cold-start time on a full install
 

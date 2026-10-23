@@ -375,6 +375,88 @@ class TestValidateSQL:
         assert self.check("SELECT foo FROM (SELECT id AS foo FROM orders) t")["unknown_columns"] == []
         assert self.check("SELECT id FROM orders WHERE customer_id IN (SELECT id FROM sales.customers)")["valid"]
 
+    def test_flags_unknown_columns_inside_ctes_and_derived_tables(self, known_tables):
+        cte = self.check("WITH r AS (SELECT o.totl, o.id FROM orders o) SELECT r.id FROM r")
+        assert cte["unknown_columns"] == ["o.totl"]
+        bare = self.check("WITH r AS (SELECT id, nme FROM sales.customers) SELECT r.id FROM r")
+        assert bare["unknown_columns"] == ["nme"]
+        derived = self.check("SELECT t.id FROM (SELECT o.id FROM orders o WHERE o.bogus > 1) t")
+        assert derived["unknown_columns"] == ["o.bogus"]
+        assert self.check("SELECT t.id FROM (SELECT id FROM orders WHERE regoin = 1) t")["unknown_columns"] == ["regoin"]
+
+    def test_outer_query_checked_against_cte_and_derived_output(self, known_tables):
+        sql = "WITH c AS (SELECT o.id, o.total_usd AS amt, count(*) AS n FROM orders o GROUP BY 1, 2) "
+        assert self.check(sql + "SELECT c.id, c.amt, n, amt FROM c")["unknown_columns"] == []
+        result = self.check(sql + "SELECT c.missing, c.total_usd, other FROM c")
+        assert result["unknown_columns"] == ["c.missing", "c.total_usd", "other"]
+        result = self.check("SELECT t.foo, t.bar, baz FROM (SELECT id AS foo FROM orders) AS t")
+        assert result["unknown_columns"] == ["t.bar", "baz"]
+        # joined to a known table: bare names are judged against both sources
+        result = self.check("SELECT name, foo, nope FROM (SELECT id AS foo FROM orders) t JOIN sales.customers c ON 1=1")
+        assert result["unknown_columns"] == ["nope"]
+
+    def test_cte_explicit_column_list(self, known_tables):
+        sql = "WITH c(a, b) AS (SELECT id, total_usd + 1 FROM orders) SELECT c.a, c.b, c.id, zzz FROM c"
+        assert self.check(sql)["unknown_columns"] == ["c.id", "zzz"]
+        # a list that doesn't provably match the body's width is not trusted
+        assert self.check("WITH c(a) AS (SELECT * FROM orders) SELECT c.x, y FROM c")["unknown_columns"] == []
+
+    def test_cte_with_column_list_is_not_an_unknown_table(self, known_tables):
+        result = self.check("WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 5) "
+                            "SELECT n FROM r")
+        assert result["unknown_tables"] == [] and result["valid"]
+
+    def test_unknown_cte_columns_skip_dependent_checks(self, known_tables):
+        for body in ("SELECT * FROM orders", "SELECT o.* FROM orders o", "SELECT id, total_usd + 1 FROM orders",
+                     "SELECT id, count(*) n FROM orders GROUP BY id UNION SELECT 1, 2"):
+            result = self.check(f"WITH c AS ({body}) SELECT c.anything, whatever FROM c")
+            assert result["unknown_columns"] == [], body
+        # a star in a derived table makes the bare columns unjudgeable
+        assert self.check("SELECT nope FROM (SELECT * FROM orders) t JOIN sales.customers c ON 1=1")["valid"]
+
+    def test_correlated_subqueries_use_outer_scope(self, known_tables):
+        ok = self.check(
+            "SELECT c.name FROM sales.customers c WHERE EXISTS "
+            "(SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.total_usd > 1 AND region = 'eu')"
+        )
+        assert ok["unknown_columns"] == [] and ok["valid"]
+        scalar = self.check(
+            "SELECT c.name, (SELECT max(o.total_usd) FROM orders o WHERE o.customer_id = c.id) AS m "
+            "FROM sales.customers c WHERE c.id IN (SELECT customer_id FROM orders)"
+        )
+        assert scalar["unknown_columns"] == []
+        bad = self.check(
+            "SELECT c.name FROM sales.customers c WHERE EXISTS "
+            "(SELECT 1 FROM orders o WHERE o.customer_id = c.idd AND o.bogus = 1 AND typo = 2)"
+        )
+        assert bad["unknown_columns"] == ["c.idd", "o.bogus", "typo"]
+
+    def test_correlated_bare_columns_skipped_when_outer_scope_is_uncertain(self, known_tables):
+        sql = ("WITH c AS (SELECT * FROM sales.customers) SELECT c.name FROM c "
+               "WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND from_outer = 1)")
+        assert self.check(sql)["unknown_columns"] == []
+
+    def test_valid_nested_query(self, known_tables):
+        result = self.check(
+            "WITH recent AS (SELECT o.id, o.customer_id, o.total_usd AS amt FROM orders o WHERE o.placed_at > '2024-01-01'), "
+            "big AS (SELECT r.customer_id, sum(r.amt) AS spend FROM recent r GROUP BY r.customer_id) "
+            "SELECT c.name, b.spend, t.top FROM big b JOIN sales.customers c ON c.id = b.customer_id "
+            "JOIN (SELECT max(amt) AS top FROM recent) t ON 1=1 "
+            "WHERE b.spend > (SELECT avg(spend) FROM big) AND c.id IN (SELECT customer_id FROM recent) ORDER BY spend"
+        )
+        assert result["unknown_columns"] == [] and result["valid"]
+
+    def test_union_branches_are_checked_separately(self, known_tables):
+        result = self.check(
+            "SELECT o.id, o.bad1 FROM orders o UNION ALL SELECT c.id, c.bad2 FROM sales.customers c "
+            "UNION SELECT id, bad3 FROM orders"
+        )
+        assert result["unknown_columns"] == ["o.bad1", "c.bad2", "bad3"]
+        # each branch sees only its own tables: region is not an orders column
+        assert self.check("SELECT id FROM orders UNION SELECT region FROM orders")["unknown_columns"] == ["region"]
+        assert self.check("WITH c AS (SELECT id FROM orders UNION SELECT id FROM sales.customers) "
+                          "SELECT c.id FROM c")["unknown_columns"] == []
+
     def test_column_metadata_unavailable_warns(self):
         with patch.object(srv, "_known_tables", return_value=dict(KNOWN)), \
              patch.object(srv, "_known_columns", return_value=None):

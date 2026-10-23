@@ -11,7 +11,7 @@ Both endpoints require login.
 curl -X POST http://localhost:8000/api/semantic/import/ossie \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d "$(jq -n --rawfile c tpcds_semantic_model.yaml '{content: $c, instance_name: "tpcds", db_type: "snowflake"}')"
-# → {"models": ["tpcds_retail_model"], "tables": 5, "relationships": 4, "metrics": 8, "skipped": [...]}
+# → {"models": ["tpcds_retail_model"], "tables": 5, "relationships": 4, "metrics": 8, "notes": 1, "skipped": [...]}
 
 # Export
 curl -H "Authorization: Bearer $TOKEN" \
@@ -27,7 +27,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 | `primary_key` / `unique_keys` | A single-column primary key becomes `PRIMARY KEY`, and a single-column unique key becomes `UNIQUE`. These drive join cardinality. Parts of a composite key are marked `COMPOSITE KEY PART`, because no one of them is unique alone |
 | `relationship` | An FK edge in the join graph, `from.c1 = to.k1, from.c2 = to.k2`. `from` is the many side |
 | `metric` | A glossary term with the formula, the tables it references, and synonyms from `ai_context`. Existing terms with the same name are updated |
-| Model `ai_context` | Not mapped (reported in `skipped`). Add it as an [OKF](../readme.md) knowledge note if the guidance matters |
+| Model `ai_context` | An OKF knowledge note (`ossie/<model>`, type `note`) attached to every table of the model, so it reaches table search and the prompt's Knowledge Notes. It is stored as OKF bundle `ossie:<model>`, listed in the Knowledge tab; re-importing replaces it. Not written back on export |
 
 Re-importing replaces the same tables' metadata for that instance. The current draft (`version: 0.2.0.dev0`, one model per document) and the 0.1.x `semantic_model:` list wrapper are both accepted.
 

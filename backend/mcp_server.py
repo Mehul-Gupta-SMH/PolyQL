@@ -46,6 +46,7 @@ import logging
 import os
 import re
 import sys
+from collections import ChainMap
 from typing import TypedDict
 
 # Ensure project root is on the path so `main` and friends import when run as a module
@@ -412,6 +413,225 @@ def _unqualified_columns(statement) -> list:
         candidates.append(name)
     return [c for c in dict.fromkeys(candidates) if c not in aliases]
 
+# --- Column check: one scope per SELECT block --------------------------------
+# Subqueries are cut out of the SQL and replaced by "(__sqN__)" so that every
+# SELECT block (CTE body, derived table, set-operation branch, EXISTS / IN /
+# scalar subquery) can be judged against its own FROM/JOIN sources only.
+_QUERY_START_RE = re.compile(
+    r"\s*(?:SELECT|WITH)\b|\s*\(__sq\d+__\)\s*(?:UNION|INTERSECT|EXCEPT|MINUS)\b", re.IGNORECASE
+)
+_SET_OP_RE = re.compile(r"\b(?:UNION(?:\s+ALL)?|INTERSECT|EXCEPT|MINUS)\b", re.IGNORECASE)
+_CTE_DEF_RE = re.compile(
+    rf"\s*(?:WITH(?:\s+RECURSIVE)?\s+|,\s*)({_IDENT})\s*(?:\(([^()]*)\))?\s*AS\s*"
+    r"(?:(?:NOT\s+)?MATERIALIZED\s*)?\(__sq(\d+)__\)",
+    re.IGNORECASE,
+)
+# (LATERAL) subquery, with the alias and column list that follow it as a derived table
+_SUBQUERY_RE = re.compile(
+    rf"(LATERAL\s+)?\(__sq(\d+)__\)(?:\s*(?:AS\s+)?({_IDENT})(?:\s*\(([^()]*)\))?)?", re.IGNORECASE
+)
+_CLAUSE_RE = re.compile(r"\b(?:WHERE|GROUP|HAVING|ORDER|LIMIT|SELECT|WINDOW|QUALIFY)\b", re.IGNORECASE)
+_SELECT_LIST_RE = re.compile(r"\s*SELECT\b(?:\s+(?:DISTINCT|ALL)\b)?(.*?)(?:\bFROM\b.*)?$", re.IGNORECASE | re.DOTALL)
+_ITEM_ALIAS_RE = re.compile(rf"\bAS\s+({_IDENT})$", re.IGNORECASE)
+_ITEM_COLUMN_RE = re.compile(rf"(?:{_IDENT}\.)*({_IDENT})$")
+
+
+def _scan_text(sql: str) -> str:
+    """SQL without comments; string literals emptied (kept as '' so sqlparse still sees a literal)."""
+    for pattern in _STRIP_RES[:2]:
+        sql = pattern.sub(" ", sql)
+    return _STRIP_RES[2].sub("''", sql)
+
+
+def _split_subqueries(sql: str):
+    """
+    Cut every parenthesised SELECT / WITH out of *sql*.
+
+    Returns (top, subs) — *top* with each subquery replaced by "(__sqN__)", *subs[N]*
+    the subquery's own text (which may itself hold placeholders of lower number) —
+    or None when the parentheses don't balance.
+    """
+    subs, stack = [], [[]]
+    for ch in sql:
+        if ch == "(":
+            stack.append([])
+        elif ch == ")":
+            if len(stack) == 1:
+                return None
+            body = "".join(stack.pop())
+            if _QUERY_START_RE.match(body):
+                subs.append(body)
+                body = f"__sq{len(subs) - 1}__"
+            stack[-1].append(f"({body})")
+        else:
+            stack[-1].append(ch)
+    return ("".join(stack[0]), subs) if len(stack) == 1 else None
+
+
+def _split_commas(text: str) -> list:
+    """Split on commas outside parentheses."""
+    parts, depth, start = [], 0, 0
+    for i, ch in enumerate(text):
+        depth += (ch == "(") - (ch == ")")
+        if ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    return parts + [text[start:]]
+
+
+def _in_from_clause(prefix: str) -> bool:
+    """True when a subquery written right after *prefix* is a FROM / JOIN / comma-joined source."""
+    tail = re.split(r"\bFROM\b", prefix, flags=re.IGNORECASE)
+    if len(tail) < 2 or _CLAUSE_RE.search(tail[-1]):
+        return False
+    return bool(re.search(r"(?:\bJOIN|,|^)\s*$", tail[-1], re.IGNORECASE))
+
+
+def _select_items(block: str):
+    """The select-list items of a SELECT block, or None when it isn't one."""
+    match = _SELECT_LIST_RE.match(block)
+    return [item.strip() for item in _split_commas(match.group(1))] if match else None
+
+
+def _item_name(item: str):
+    """Output column name of a select item (`expr AS name`, `t.col`, `col`), else None."""
+    match = _ITEM_ALIAS_RE.search(item) or _ITEM_COLUMN_RE.match(item)
+    name = _unquote(match.group(1)) if match else None
+    return None if name is None or name.isdigit() or name in ("null", "true", "false") else name
+
+
+def _output_columns(items, explicit):
+    """
+    Column names a CTE / derived table exposes, or None when they can't be told:
+    a `*`, an expression without an alias, or an explicit column list whose length
+    doesn't provably match.
+    """
+    if items is None or any(item.endswith("*") for item in items):
+        return None
+    if explicit is not None:
+        return set(explicit) if len(explicit) == len(items) else None
+    names = [_item_name(item) for item in items]
+    return set(names) if None not in names else None
+
+
+class _Block:
+    """One SELECT block: its sources and the enclosing block it may be correlated with."""
+
+    def __init__(self, outer=None):
+        self.sources = {}  # alias -> set of column names, or None when unknown
+        self.outer = outer
+
+    def chain(self):
+        block = self
+        while block is not None:
+            yield block
+            block = block.outer
+
+    def lookup(self, qualifier: str):
+        """Columns of the source *qualifier* names here or in an enclosing block (None: unknown)."""
+        for block in self.chain():
+            if qualifier in block.sources:
+                return block.sources[qualifier]
+        return None
+
+
+class _ColumnChecker:
+    """
+    Finds unknown columns scope by scope. Whenever the answer is uncertain
+    (unknown table, `*` or unnamed expression in a CTE / derived table,
+    unbalanced parentheses) the columns concerned are not reported.
+
+      qualified `q.col`  checked against the source q in this block, else in an
+                         enclosing block (correlated subquery)
+      bare `col`         checked against this block's sources — plus the enclosing
+                         blocks' for a correlated subquery — and only when every
+                         one of them has known columns
+    """
+
+    def __init__(self, table_columns, bare: bool):
+        self.table_columns = table_columns  # table name -> set of columns or None
+        self.bare = bare
+        self.subs = []
+        self.unknown = []
+
+    def run(self, sql: str) -> list:
+        split = _split_subqueries(_scan_text(sql))
+        if split is None:
+            return []
+        top, self.subs = split
+        for statement in top.split(";"):
+            if statement.strip():
+                self._query(statement, None, ChainMap())
+        return self.unknown
+
+    def _query(self, text, outer, ctes):
+        """A WITH header plus set-operation branches; returns the select items of the first branch."""
+        ctes = ctes.new_child()
+        defs, pos = [], 0
+        while match := _CTE_DEF_RE.match(text, pos):
+            name, explicit, sub = _unquote(match.group(1)), match.group(2), int(match.group(3))
+            explicit = [_unquote(c.strip()) for c in explicit.split(",")] if explicit else None
+            defs.append((name, explicit, sub))
+            ctes[name] = None  # visible (columns unknown) to itself and later CTEs
+            pos = match.end()
+        for name, explicit, sub in defs:
+            ctes[name] = _output_columns(self._query(self.subs[sub], None, ctes), explicit)
+        first = None
+        for i, branch in enumerate(_SET_OP_RE.split(text[pos:])):
+            items = self._block(branch, outer, ctes)
+            first = items if i == 0 else first
+        return first
+
+    def _source_columns(self, table, ctes):
+        columns = ctes[table] if table in ctes else self.table_columns(table)
+        return set(columns) if columns else None
+
+    def _block(self, text, outer, ctes):
+        refs, aliases, _, column_sql = _table_refs(text)
+        block = _Block(outer)
+        for alias, table in aliases.items():
+            block.sources[alias] = self._source_columns(table, ctes)
+        correlated = []
+        for match in _SUBQUERY_RE.finditer(text):
+            lateral, sub, alias, explicit = match.groups()
+            if not _in_from_clause(text[:match.start()]):
+                correlated.append(int(sub))
+                continue
+            items = self._query(self.subs[int(sub)], block if lateral else None, ctes)
+            alias = _unquote(alias or "")
+            if alias in _NOT_ALIAS:
+                alias, explicit = "", None
+            explicit = [_unquote(c.strip()) for c in explicit.split(",")] if explicit else None
+            block.sources[alias or f"__sq{sub}__"] = _output_columns(items, explicit)
+
+        for qualifier, column in _COLUMN_REF_RE.findall(column_sql):
+            columns = block.lookup(qualifier.lower())
+            if columns is not None and column != "*" and column.lower() not in columns:
+                self._report(f"{qualifier.lower()}.{column.lower()}")
+        self._check_bare(text, block)
+
+        for sub in correlated:
+            self._query(self.subs[sub], block, ctes)
+        return _select_items(text)
+
+    def _check_bare(self, text, block):
+        import sqlparse
+
+        chain = list(block.chain())
+        if not (self.bare and block.sources and _SELECT_LIST_RE.match(text)
+                and all(None not in b.sources.values() for b in chain)):
+            return
+        available = {c for b in chain for columns in b.sources.values() for c in columns}
+        skip = {alias for b in chain for alias in b.sources}
+        statements = [s for s in sqlparse.parse(text) if str(s).strip()]
+        for column in _unqualified_columns(statements[0]) if statements else []:
+            if column not in available and column not in skip and not column.startswith("__sq"):
+                self._report(column)
+
+    def _report(self, ref):
+        if ref not in self.unknown:
+            self.unknown.append(ref)
+
 
 class SQLCheck(TypedDict):
     valid: bool
@@ -430,10 +650,14 @@ def validate_sql(sql: str, instance: str = "default") -> SQLCheck:
 
     Reports whether it parses, whether every statement is read-only
     (SELECT / WITH … SELECT), any FROM/JOIN table that PolyQL doesn't know
-    (CTE names are ignored), and any column that doesn't exist: qualified
-    columns (alias.column) against their table; bare columns against the
-    FROM/JOIN tables when every source is a known table (not a CTE or
-    subquery). Does not run the query.
+    (CTE names are ignored), and any column that doesn't exist. Each SELECT
+    (main query, CTE body, subquery, UNION branch) is checked against its own
+    FROM/JOIN sources: qualified columns (alias.column) against their table;
+    bare columns only when every source is known. A CTE or derived table
+    exposes its output names (explicit column list, aliases, plain columns);
+    with `*` or an unaliased expression its columns are unknown and checks
+    that depend on it are skipped, as are outer-scope references from
+    correlated subqueries. Does not run the query.
     Returns {valid, read_only, statement_types, unknown_tables,
     unknown_columns, errors, warnings}.
     """
@@ -456,10 +680,10 @@ def validate_sql(sql: str, instance: str = "default") -> SQLCheck:
     if into:
         errors.append("Not read-only: SELECT … INTO writes a table or file.")
 
-    refs, aliases, cleaned, column_sql = _table_refs(sql)
+    refs, _, cleaned, _ = _table_refs(sql)
     ctes = {
         m.lower()
-        for m in re.findall(r"(?:\bWITH(?:\s+RECURSIVE)?|,)\s+([\w$]+)\s+AS\s*\(", cleaned, re.IGNORECASE)
+        for m in re.findall(r"(?:\bWITH(?:\s+RECURSIVE)?|,)\s+([\w$]+)\s*(?:\([^()]*\))?\s+AS\s*\(", cleaned, re.IGNORECASE)
     }
     known_tables = _known_tables(instance)
     unknown = []
@@ -482,34 +706,11 @@ def validate_sql(sql: str, instance: str = "default") -> SQLCheck:
             warnings.append("Column metadata unavailable — column check skipped.")
     else:
         by_short = {t.rsplit(".", 1)[-1]: t for t in known_columns}
-        for qualifier, column in _COLUMN_REF_RE.findall(column_sql):
-            qualifier, column = qualifier.lower(), column.lower()
-            if column == "*" or qualifier in ctes:
-                continue
-            table = aliases.get(qualifier)
-            if table is None or table in ctes:
-                continue  # subquery alias or something we can't resolve
-            columns = known_columns.get(table) or known_columns.get(by_short.get(table.rsplit(".", 1)[-1], ""))
-            if not columns:
-                continue  # no column metadata for this table
-            ref = f"{qualifier}.{column}"
-            if column not in columns and ref not in unknown_columns:
-                unknown_columns.append(ref)
-        # Bare columns: only judged when every FROM/JOIN source is a known table
-        # with column metadata (no CTEs, no subqueries), so a miss can't be a
-        # column that some other source provides.
-        if (len(statements) == 1 and refs and not ctes and not unknown
-                and not re.search(r"\(\s*SELECT\b", cleaned, re.IGNORECASE)):
-            source_columns = [
-                known_columns.get(t) or known_columns.get(by_short.get(t.rsplit(".", 1)[-1], ""))
-                for t in refs
-            ]
-            if all(source_columns):
-                available = set().union(*source_columns)
-                skip = set(aliases) | set(refs) | {r.rsplit(".", 1)[-1] for r in refs}
-                for column in _unqualified_columns(statements[0]):
-                    if column not in available and column not in skip and column not in unknown_columns:
-                        unknown_columns.append(column)
+
+        def table_columns(name):
+            return known_columns.get(name) or known_columns.get(by_short.get(name.rsplit(".", 1)[-1], ""))
+
+        unknown_columns = _ColumnChecker(table_columns, bare=len(statements) == 1).run(sql)
     if unknown_columns:
         errors.append(f"Unknown columns: {', '.join(unknown_columns)}.")
 
