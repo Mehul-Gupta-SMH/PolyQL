@@ -474,6 +474,9 @@ def post_execute(body: ExecuteRequest, user: dict = Depends(get_current_user)):
 @app.get("/api/schema")
 def get_schema(instance_name: str = "default"):
     from MetadataManager.MetadataStore.relationdb import kuzuDB
+    from MetadataManager.MetadataStore.relationdb.joinpath import (
+        FK, LINEAGE, _options, is_join_edge, join_type, load_unique_columns,
+    )
     from Utilities.base_utils import accessDB, get_config_val
 
     graph = kuzuDB.getObj(instance_name)
@@ -502,13 +505,26 @@ def get_schema(instance_name: str = "default"):
             ],
         })
 
-    seen = set()
+    # Kuzu stores every join in both directions; draw such a mirror pair once.
+    # A reverse edge with different conditions or kind is a distinct relation.
+    unique_columns = load_unique_columns(instance_name)
     relations = []
+    seen = set()
     for src, tgt, data in graph.edges(data=True):
-        key = tuple(sorted([src, tgt]))
-        if key not in seen:
-            seen.add(key)
-            relations.append({"source": src, "target": tgt, "joinKeys": data.get("JoinKeys", [])})
+        options = _options(data)
+        kind = LINEAGE if data.get("Kind", FK) == LINEAGE else FK
+        if (tgt, src, kind, frozenset(options)) in seen:
+            continue
+        seen.add((src, tgt, kind, frozenset(options)))
+        join = is_join_edge(data)
+        relations.append({
+            "source": src,
+            "target": tgt,
+            "joinKeys": options[0] if options else "",
+            "alternatives": options,
+            "cardinality": join_type(options[0], src, tgt, unique_columns) if join else None,
+            "kind": kind,
+        })
 
     return {"tables": tables, "relations": relations}
 
