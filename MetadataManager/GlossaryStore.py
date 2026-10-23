@@ -326,7 +326,6 @@ def get_business_context(
         logger.warning("GlossaryStore.get_business_context: retrieval failed — %s", exc)
         return []
 
-    ids       = (raw.get("ids")       or [[]])[0]
     metadatas = (raw.get("metadatas") or [[]])[0]
     distances = (raw.get("distances") or [[]])[0]
 

@@ -7,15 +7,16 @@ export default function TableNode({ data }) {
         minWidth: 260,
         width: 260,
         background: '#fff',
-        border: data.selected ? '2px solid #2563eb' : '1px solid #ddd',
+        border: data.selected ? '2px solid #2563eb' : data.related ? '2px solid #8b5cf6' : '1px solid #ddd',
         borderRadius: 8,
         overflow: 'hidden',
         fontFamily: 'sans-serif',
         fontSize: 12,
-        boxShadow: data.selected ? '0 0 0 3px #bfdbfe' : 'none',
+        boxShadow: data.selected ? '0 0 0 3px #bfdbfe' : data.related ? '0 0 0 3px #ddd6fe' : 'none',
       }}
     >
       <Handle type="target" position={Position.Left} />
+      <Handle id="term" type="target" position={Position.Top} style={{ opacity: 0 }} />
 
       <div
         style={{
