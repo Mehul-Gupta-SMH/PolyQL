@@ -120,7 +120,7 @@ class TestMapping:
         }]
         skipped = " | ".join(mapped["skipped"])
         assert "broken" in skipped and "uneven" in skipped and "no_expr" in skipped
-        assert "recent: source is a query" in skipped and "model-level ai_context" in skipped
+        assert "recent: source is a query" in skipped and "ai_context" not in skipped
 
     def test_metrics(self, mapped):
         assert mapped["terms"] == [{
@@ -214,7 +214,64 @@ def test_round_trip_is_lossless(mapped):
 # Storage side
 # ---------------------------------------------------------------------------
 
+class TestModelNotes:
+    def test_note_from_object_ai_context(self, mapped):
+        (note,) = mapped["notes"]
+        assert note["concept_id"] == "ossie/retail" and note["type"] == "note"
+        assert note["title"] == "retail — guidance" and note["body"] == "Revenue excludes returns."
+        assert note["links"] == [] and note["status"] == "stable"
+        assert note["tables"] == ["retail.public.store_sales", "retail.public.customer", "recent"]
+
+    def test_string_ai_context_and_synonyms(self):
+        def note(ctx):
+            model = {"name": "m", "datasets": [{"name": "a"}], "ai_context": ctx}
+            return O.model_to_polyql(model)["notes"]
+        assert note("Plain text")[0]["body"] == "Plain text"
+        body = note({"instructions": "Do x.", "synonyms": ["s1", "s2"]})[0]["body"]
+        assert body == "Do x.\n\nSynonyms: s1, s2."
+        assert note({"synonyms": ["only"]})[0]["body"] == "Synonyms: only."
+
+    @pytest.mark.parametrize("ctx", [None, "", "  ", {}, {"instructions": ""}])
+    def test_no_note_without_ai_context(self, ctx):
+        model = {"name": "m", "datasets": [{"name": "a"}], "ai_context": ctx}
+        assert O.model_to_polyql(model)["notes"] == []
+
+    def test_note_reaches_table_search(self, mapped):
+        from MetadataManager import OKFStore
+        concept = mapped["notes"][0]
+        names = OKFStore.concept_table_candidates(concept, {})
+        known = ["store_sales", "customer", "recent", "other"]
+        assert OKFStore.resolve_tables(names, known) == ["store_sales", "customer", "recent"]
+
+
 class TestImportIntoPolyQL:
+    def _run(self, **kwargs):
+        with patch("backend.ingestion.store_table"), \
+             patch("MetadataManager.MetadataStore.ManageRelations.Relations"), \
+             patch("MetadataManager.GlossaryStore.get_term_by_name", return_value=None), \
+             patch("MetadataManager.GlossaryStore.add_term", return_value="new"), \
+             patch("MetadataManager.GlossaryStore.get_term", return_value={}):
+            return O.import_into_polyql(DOC, instance_name="prod", **kwargs)
+
+    def test_okf_index_receives_notes(self):
+        index = MagicMock()
+        summary = self._run(okf_index=index)
+        assert summary["notes"] == 1 and not any("ai_context" in m for m in summary["skipped"])
+        notes, bundle = index.call_args.args
+        assert bundle == "ossie:retail" and notes[0]["concept_id"] == "ossie/retail"
+
+    def test_reimport_without_ai_context_clears_note(self):
+        index = MagicMock()
+        with patch("MetadataManager.OssieStore.load_models", return_value=[{"name": "retail", "datasets": []}]):
+            summary = self._run(okf_index=index)
+        assert summary["notes"] == 0
+        index.assert_called_once_with([], "ossie:retail")
+
+    def test_without_okf_index_note_is_skipped(self):
+        summary = self._run()
+        assert summary["notes"] == 0
+        assert any("retail: ai_context not imported" in m for m in summary["skipped"])
+
     def test_stores_tables_edges_and_upserts_terms(self):
         rag, index = MagicMock(), MagicMock()
         existing = {"term_id": "t1", "term_name": "total_net_paid"}
@@ -282,12 +339,17 @@ class TestEndpoints:
         return TestClient(app)
 
     def test_import(self, client):
-        summary = {"models": ["retail"], "tables": 3, "relationships": 1, "metrics": 1, "skipped": []}
-        with patch("MetadataManager.MetadataStore.RAGPipeline.ManageInformation"), \
+        summary = {"models": ["retail"], "tables": 3, "relationships": 1, "metrics": 1, "notes": 1, "skipped": []}
+        with patch("MetadataManager.MetadataStore.RAGPipeline.ManageInformation") as rag_cls, \
+             patch("MetadataManager.OKFStore.index_concepts") as index, \
              patch("MetadataManager.OssieStore.import_into_polyql", return_value=summary) as imp:
             resp = client.post("/api/semantic/import/ossie", json={"content": DOC, "instance_name": "prod"})
         assert resp.status_code == 200 and resp.json() == summary
         assert imp.call_args.kwargs["instance_name"] == "prod"
+        imp.call_args.kwargs["okf_index"]([{"concept_id": "ossie/retail"}], "ossie:retail")
+        rag = rag_cls.return_value
+        index.assert_called_once_with([{"concept_id": "ossie/retail"}], rag.embedding_model,
+                                      rag.vdb.client, "prod", "ossie:retail")
 
     def test_import_rejects_invalid_document_before_loading_models(self, client):
         with patch("MetadataManager.MetadataStore.RAGPipeline.ManageInformation") as rag:

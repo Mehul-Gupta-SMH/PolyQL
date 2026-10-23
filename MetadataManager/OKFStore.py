@@ -187,8 +187,15 @@ def table_candidates(concept: dict) -> list:
 
 
 def concept_table_candidates(concept: dict, by_id: dict) -> list:
-    """Candidates from the concept itself plus the table concepts it links to (one hop)."""
+    """
+    Candidates from the concept itself, its explicit `tables` list (set by importers
+    such as Ossie, not by bundle files), and the table concepts it links to (one hop).
+    """
     names = list(table_candidates(concept))
+    for table in concept.get("tables") or []:
+        norm = _normalize_name(str(table))
+        if norm and norm not in names:
+            names.append(norm)
     for link in concept.get("links", []):
         linked = by_id.get(link)
         if linked:
@@ -233,33 +240,27 @@ def _build_embed_document(concept: dict) -> str:
     return "\n".join(parts)
 
 
-def import_bundle(
-    bundle_path: str,
+def index_concepts(
+    concepts: list,
     embedding_model,
     chroma_client,
     instance_name: str = "default",
-    bundle_name: str | None = None,
+    bundle_name: str = "default",
 ) -> dict:
     """
-    Embed every active concept of an OKF bundle into the 'okf_concepts' collection.
+    Embed parsed concepts (the shape parse_concept returns) into 'okf_concepts' as
+    bundle *bundle_name*, replacing any earlier copy of that bundle.
 
-    Concepts with status 'deprecated' are not indexed. Every concept is tagged
-    with *bundle_name* (default: the bundle directory's name) so the bundle can
-    be listed and removed later; re-importing a bundle replaces its concepts,
-    so concepts removed from the bundle disappear too. Concept ids are unique
-    per (instance_name, concept_id) — a concept in another bundle with the same
-    id is taken over by the newer import.
+    Deprecated concepts are skipped. A concept may carry an optional `tables`
+    list of table names to attach it to (see concept_table_candidates).
 
     Returns:
-        dict: {bundle, indexed, skipped, deprecated, table_concepts}
+        dict: {bundle, indexed, deprecated, table_concepts}
     """
     from MetadataManager.MetadataStore.vdb.Chroma import addData
     from MetadataManager.retrieval_cache import clear as clear_retrieval_cache
 
-    concepts, skipped = load_bundle(bundle_path)
     by_id = {c["concept_id"]: c for c in concepts}
-    bundle_name = bundle_name or Path(bundle_path).expanduser().resolve().name
-
     data, deprecated, table_concepts = [], 0, 0
     for concept in concepts:
         if concept["status"] == "deprecated":
@@ -293,16 +294,47 @@ def import_bundle(
     finally:
         clear_retrieval_cache()  # concepts feed table search and the prompt
 
-    logger.info(
-        "OKFStore: imported %s into instance %r — %d indexed, %d skipped, %d deprecated",
-        bundle_path, instance_name, len(data), len(skipped), deprecated,
-    )
     return {
         "bundle": bundle_name,
         "indexed": len(data),
-        "skipped": skipped,
         "deprecated": deprecated,
         "table_concepts": table_concepts,
+    }
+
+
+def import_bundle(
+    bundle_path: str,
+    embedding_model,
+    chroma_client,
+    instance_name: str = "default",
+    bundle_name: str | None = None,
+) -> dict:
+    """
+    Embed every active concept of an OKF bundle into the 'okf_concepts' collection.
+
+    Concepts with status 'deprecated' are not indexed. Every concept is tagged
+    with *bundle_name* (default: the bundle directory's name) so the bundle can
+    be listed and removed later; re-importing a bundle replaces its concepts,
+    so concepts removed from the bundle disappear too. Concept ids are unique
+    per (instance_name, concept_id) — a concept in another bundle with the same
+    id is taken over by the newer import.
+
+    Returns:
+        dict: {bundle, indexed, skipped, deprecated, table_concepts}
+    """
+    concepts, skipped = load_bundle(bundle_path)
+    bundle_name = bundle_name or Path(bundle_path).expanduser().resolve().name
+    result = index_concepts(concepts, embedding_model, chroma_client, instance_name, bundle_name)
+    logger.info(
+        "OKFStore: imported %s into instance %r — %d indexed, %d skipped, %d deprecated",
+        bundle_path, instance_name, result["indexed"], len(skipped), result["deprecated"],
+    )
+    return {
+        "bundle": bundle_name,
+        "indexed": result["indexed"],
+        "skipped": skipped,
+        "deprecated": result["deprecated"],
+        "table_concepts": result["table_concepts"],
     }
 
 

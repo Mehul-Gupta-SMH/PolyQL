@@ -33,10 +33,12 @@ def import_ossie(body: OssieImportRequest):
     Import an Ossie semantic model. Re-importing replaces the same tables'
     metadata and updates metrics by name.
 
-    Returns {models, tables, relationships, metrics, skipped}.
+    Returns {models, tables, relationships, metrics, notes, skipped}. A model's
+    top-level ai_context is indexed as an OKF note (bundle `ossie:<model>`).
     """
     from MetadataManager.GlossaryStore import index_term
     from MetadataManager.MetadataStore import RAGPipeline
+    from MetadataManager.OKFStore import index_concepts
     from MetadataManager.OssieStore import import_into_polyql, load_models
 
     try:
@@ -46,6 +48,8 @@ def import_ossie(body: OssieImportRequest):
         return import_into_polyql(
             body.content, instance_name=body.instance_name, db_type=body.db_type, vdb=rag,
             glossary_index=lambda term: index_term(term, rag.embedding_model, rag.vdb.client),
+            okf_index=lambda notes, bundle: index_concepts(
+                notes, rag.embedding_model, rag.vdb.client, body.instance_name, bundle),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

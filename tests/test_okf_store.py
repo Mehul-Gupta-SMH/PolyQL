@@ -159,6 +159,41 @@ class TestImportBundle:
         assert first == second
 
 
+def _concept_dict(cid, status="stable", **extra):
+    return {"concept_id": cid, "type": "note", "title": cid, "description": "", "resource": "",
+            "tags": [], "status": status, "table_name": "", "body": "b", "links": [], **extra}
+
+
+class TestIndexConcepts:
+    def test_skips_deprecated_and_replaces_bundle_before_add(self):
+        order, client = [], MagicMock()
+        concepts = [_concept_dict("a", tables=["Orders"]), _concept_dict("b", status="deprecated")]
+        with patch("MetadataManager.OKFStore.delete_bundle",
+                   side_effect=lambda *a: order.append("delete")) as delete, \
+             patch("MetadataManager.MetadataStore.vdb.Chroma.addData",
+                   side_effect=lambda *a: order.append("add")) as add_data, \
+             patch("MetadataManager.retrieval_cache.clear") as clear:
+            result = OKFStore.index_concepts(concepts, _model(), client, "prod", "ossie:m")
+
+        assert result == {"bundle": "ossie:m", "indexed": 1, "deprecated": 1, "table_concepts": 0}
+        assert order == ["delete", "add"]
+        delete.assert_called_once_with(client, "prod", "ossie:m")
+        (record,) = add_data.call_args[0][1]
+        assert record["metadata"]["tables"] == "orders" and record["metadata"]["bundle"] == "ossie:m"
+        clear.assert_called_once()
+
+    def test_empty_bundle_only_deletes_and_clears_cache_on_error(self):
+        with patch("MetadataManager.OKFStore.delete_bundle", side_effect=RuntimeError("boom")), \
+             patch("MetadataManager.retrieval_cache.clear") as clear, \
+             pytest.raises(RuntimeError):
+            OKFStore.index_concepts([], _model(), MagicMock())
+        clear.assert_called_once()
+
+    def test_explicit_tables_in_candidates(self):
+        concept = _concept_dict("n", tables=["Sales Orders", "orders"])
+        assert OKFStore.concept_table_candidates(concept, {}) == ["sales_orders", "orders"]
+
+
 # ---------------------------------------------------------------------------
 # Query-time search
 # ---------------------------------------------------------------------------
