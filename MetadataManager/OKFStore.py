@@ -474,6 +474,22 @@ def list_bundles(chroma_client) -> list:
             for (i, b), n in sorted(counts.items())]
 
 
+def get_bundle_concepts(chroma_client, instance_name: str, bundle: str | None = None) -> list:
+    """
+    Stored concepts of an instance — one bundle, or every bundle when *bundle* is
+    None — as metadata dicts (concept_id, type, title, description, body, tables,
+    instance_name, bundle), sorted by bundle then concept_id. [] when nothing is imported.
+    """
+    collection = _collection(chroma_client)
+    if collection is None:
+        return []
+    found = collection.get(where={"instance_name": instance_name}, include=["metadatas"])
+    rows = [dict(m) for m in (found.get("metadatas") or []) if m]
+    if bundle:
+        rows = [m for m in rows if m.get("bundle", UNNAMED_BUNDLE) == bundle]
+    return sorted(rows, key=lambda m: (m.get("bundle") or "", m.get("concept_id") or ""))
+
+
 def delete_bundle(chroma_client, instance_name: str, bundle: str | None = None) -> int:
     """
     Remove an instance's imported concepts — one bundle, or all of them when

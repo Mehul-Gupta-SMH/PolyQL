@@ -506,6 +506,20 @@ class TestBundles:
         assert OKFStore.list_bundles(client) == []
         assert OKFStore.delete_bundle(client, "default", "sales") == 0
 
+    def test_get_bundle_concepts(self):
+        client = _fake_client(_ROWS)
+        assert [m.get("bundle") for m in OKFStore.get_bundle_concepts(client, "default")] == \
+            [None, "hr", "sales", "sales"]
+        got = OKFStore.get_bundle_concepts(client, "default", "sales")
+        assert len(got) == 2 and all(m["instance_name"] == "default" for m in got)
+        assert OKFStore.get_bundle_concepts(client, "default", "(unnamed)") == [_ROWS["e"]]
+        assert OKFStore.get_bundle_concepts(client, "nobody") == []
+
+    def test_get_bundle_concepts_without_collection(self):
+        client = MagicMock()
+        client.get_collection.side_effect = ValueError("does not exist")
+        assert OKFStore.get_bundle_concepts(client, "default", "sales") == []
+
     def test_delete_one_bundle_of_one_instance(self):
         client = _fake_client(_ROWS)
         assert OKFStore.delete_bundle(client, "default", "sales") == 2

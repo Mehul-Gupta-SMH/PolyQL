@@ -64,7 +64,13 @@ def export_ossie(instance_name: str = "default", name: str | None = None):
     from MetadataManager.OssieStore import build_document
 
     try:
-        document = build_document(instance_name, name)
+        try:
+            from backend.okf import _chroma_client
+            chroma_client = _chroma_client()
+        except Exception:
+            logger.warning("Ossie export: ChromaDB unavailable; exporting without ai_context", exc_info=True)
+            chroma_client = None
+        document = build_document(instance_name, name, chroma_client)
     except Exception as exc:
         logger.exception("Ossie export failed")
         raise HTTPException(status_code=500, detail=f"Ossie export failed: {exc}") from exc
