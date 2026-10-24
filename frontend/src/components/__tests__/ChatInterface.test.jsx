@@ -117,3 +117,26 @@ describe('ChatMessage clarify options', () => {
     expect(handleOptionSelect).toHaveBeenCalledWith('Use Claude Code')
   })
 })
+
+describe('ChatInterface rate limiting', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('shows a Retry-After message on 429', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      if (String(url).startsWith('/api/chat/stream')) {
+        return Promise.resolve({
+          ok: false,
+          status: 429,
+          headers: { get: (h) => (h === 'Retry-After' ? '7' : null) },
+          json: () => Promise.resolve({ detail: 'Rate limit exceeded — try again in 7 s.' }),
+        })
+      }
+      return Promise.resolve({ json: () => Promise.resolve({ balances: {}, instances: [] }) })
+    }))
+    render(<ChatInterface providers={['open_ai']} />)
+    await userEvent.type(screen.getByPlaceholderText(/Ask a question/), 'show orders{Enter}')
+    expect(await screen.findByText(/Too many requests — try again in 7 s/)).toBeInTheDocument()
+  })
+})

@@ -66,6 +66,12 @@ Guidelines and context for AI-assisted development on this project.
 - Run all tests: `pytest tests/` (an autouse fixture clears the retrieval cache and shared models between tests)
 - Lint: `python -m ruff check backend/ tests/ validation/` (runs in CI before tests)
 
+## Rate limits and circuit breakers
+
+- `backend/rate_limit.py` — `Depends(rate_limited)` (wraps `get_current_user`) on LLM routes; per-user token bucket, env `POLYQL_RATE_LIMIT_PER_MIN` / `_BURST`; 429 + `Retry-After`
+- `APIManager/circuit_breaker.py` — per-provider breaker inside `CallLLMApi.CallService` / `CallServiceStream`; `CircuitOpenError` → 503 via an exception handler in `backend/app.py` (re-raise it before any generic `except Exception`); env `POLYQL_BREAKER_FAILURES` / `_COOLDOWN_S`
+- Both are reset by the autouse fixture in `tests/conftest.py`; tests share user `testuser`, so a test making more than 10 LLM-route calls must raise the limit
+
 ## Observability
 
 - `backend/logging_config.py` — `configure_logging()` switches root logger to JSON format on startup
@@ -126,3 +132,5 @@ Guidelines and context for AI-assisted development on this project.
 | 2026-10-23 | `MetadataManager/OssieStore.py`, `OKFStore.py`, `backend/semantic.py`, `frontend/…/KnowledgePanel.jsx`, `docs/ossie.md`, `tests/test_ossie.py`, `tests/test_okf_store.py` | #30: Ossie model-level `ai_context` imported as an OKF note (bundle `ossie:<model>`); `OKFStore.index_concepts()`; 14 new tests |
 | 2026-10-23 | `backend/mcp_server.py`, `docs/mcp.md`, `tests/test_mcp_server.py` | #30: `validate_sql` column checks per SELECT block (CTEs, derived tables, UNION branches, correlated subqueries); CTE with a column list no longer an unknown table; 11 new tests (488 total) |
 | 2026-10-24 | `MetadataManager/OssieStore.py`, `OKFStore.py`, `backend/semantic.py`, `docs/ossie.md`, `tests/test_ossie.py`, `tests/test_okf_store.py` | #30: Ossie export writes model-level `ai_context` back from the OKF notes; `OKFStore.get_bundle_concepts()`; 11 new tests |
+| 2026-10-24 | `backend/rate_limit.py`, `backend/app.py`, `backend/mcp_server.py`, `backend/metrics.py`, `frontend/…/ChatInterface.jsx`, `tests/test_rate_limit.py` | A4: per-user token-bucket rate limit on LLM routes + MCP `generate_sql`, 429 + Retry-After, metric; 19 new tests + 1 Vitest |
+| 2026-10-24 | `APIManager/circuit_breaker.py`, `APIManager/AllAPICaller.py`, `backend/app.py`, `backend/metrics.py`, `tests/test_circuit_breaker.py` | B1: per-provider circuit breakers (503 + Retry-After, half-open trial, 400/413/422 neutral), `/api/providers` breaker state, metric; 34 new tests (551 total) |

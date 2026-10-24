@@ -24,9 +24,29 @@ import subprocess
 import time
 import requests
 import yaml
+from APIManager.circuit_breaker import get_breaker
 from Utilities.base_utils import get_config_val
 
 logger = logging.getLogger(__name__)
+
+# Errors caused by the request itself (one user's prompt), not the provider:
+# they don't count towards opening its circuit breaker.
+_REQUEST_ERROR_STATUS = {400, 413, 422}
+
+
+class LLMRequestError(ValueError):
+    """A provider answered with a non-200 status."""
+
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _record_error(breaker, exc: Exception) -> None:
+    if getattr(exc, "status_code", None) in _REQUEST_ERROR_STATUS:
+        breaker.abandon()
+    else:
+        breaker.record_failure()
 
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0          # seconds; doubles on each attempt
@@ -111,6 +131,23 @@ class CallLLMApi:
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be a non-empty string.")
 
+        # Circuit breaker: fail fast (CircuitOpenError) while the provider is
+        # paused. Any error raised by the call itself — transport error,
+        # timeout, HTTP 5xx/429, 401/403 and other 4xx (a bad key fails every call),
+        # CLI missing/non-zero exit — counts as a failure, except 400/413/422,
+        # which are about this request and give no verdict; a returned
+        # response resets the count. Input validation above is not counted.
+        breaker = get_breaker(self.llmService)
+        breaker.before_call()
+        try:
+            result = self._call_service_impl(prompt)
+        except Exception as exc:
+            _record_error(breaker, exc)
+            raise
+        breaker.record_success()
+        return result
+
+    def _call_service_impl(self, prompt: str) -> str:
         # ------------------------------------------------------------------ #
         # claude_code — delegate to the local Claude Code CLI                 #
         # ------------------------------------------------------------------ #
@@ -219,9 +256,10 @@ class CallLLMApi:
                 raise
             except Exception:
                 pass
-            raise ValueError(
+            raise LLMRequestError(
                 f"LLM API call failed after {attempt} attempt(s). "
-                f"Status code: {response.status_code} — {detail}"
+                f"Status code: {response.status_code} — {detail}",
+                response.status_code,
             )
 
     def CallServiceStream(self, prompt: str):
@@ -242,9 +280,31 @@ class CallLLMApi:
             raise ValueError("prompt must be a non-empty string.")
 
         # CLI providers — no native streaming; fall back to batch
+        # (CallService applies the circuit breaker itself)
         if self.llmService.lower() in ("claude_code", "codex_cli"):
             yield self.CallService(prompt)
             return
+
+        if self.llmService.lower() not in ("open_ai", "groq", "codex", "anthropic", "google"):
+            yield self.CallService(prompt)   # unknown provider — batch, breaker inside
+            return
+
+        # Circuit breaker for the streaming HTTP path: a raise before or while
+        # yielding is a failure, running to completion is a success, and a
+        # consumer that stops early (GeneratorExit) gives no verdict.
+        breaker = get_breaker(self.llmService)
+        breaker.before_call()
+        try:
+            yield from self._stream_impl(prompt)
+        except GeneratorExit:
+            breaker.abandon()
+            raise
+        except Exception as exc:
+            _record_error(breaker, exc)
+            raise
+        breaker.record_success()
+
+    def _stream_impl(self, prompt: str):
 
         if self.llmService.lower() in ("open_ai", "groq", "codex", "anthropic"):
             self.api_temp_dict["payload"]["messages"][0]["content"] = prompt
@@ -262,8 +322,9 @@ class CallLLMApi:
                 timeout=_REQUEST_TIMEOUT,
             ) as response:
                 if response.status_code != 200:
-                    raise ValueError(
-                        f"LLM API call failed: {response.status_code} — {response.text[:200]}"
+                    raise LLMRequestError(
+                        f"LLM API call failed: {response.status_code} — {response.text[:200]}",
+                        response.status_code,
                     )
                 for raw_line in response.iter_lines():
                     line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
@@ -291,8 +352,9 @@ class CallLLMApi:
                 timeout=_REQUEST_TIMEOUT,
             ) as response:
                 if response.status_code != 200:
-                    raise ValueError(
-                        f"LLM API call failed: {response.status_code} — {response.text[:200]}"
+                    raise LLMRequestError(
+                        f"LLM API call failed: {response.status_code} — {response.text[:200]}",
+                        response.status_code,
                     )
                 for raw_line in response.iter_lines():
                     line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
@@ -325,8 +387,9 @@ class CallLLMApi:
                 timeout=_REQUEST_TIMEOUT,
             ) as response:
                 if response.status_code != 200:
-                    raise ValueError(
-                        f"LLM API call failed: {response.status_code} — {response.text[:200]}"
+                    raise LLMRequestError(
+                        f"LLM API call failed: {response.status_code} — {response.text[:200]}",
+                        response.status_code,
                     )
                 for raw_line in response.iter_lines():
                     line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line

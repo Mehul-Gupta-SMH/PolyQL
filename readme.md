@@ -356,6 +356,21 @@ python -m benchmark.ingest_agent \
 
 `GET /api/providers/balance` checks credit balance for every configured provider and returns availability labels shown in the UI dropdowns. Providers with invalid keys or no credit are greyed out automatically.
 
+### Rate limits and provider circuit breakers
+
+Endpoints that call an LLM (`/api/chat`, `/api/chat/stream`, `/api/query`, `/api/ingest/preview`, and the MCP `generate_sql` tool) share a per-user token bucket. Over the limit they return **429** with `Retry-After`, and the chat shows "Too many requests — try again in N s".
+
+Each LLM provider also has a circuit breaker. After a run of consecutive failures (errors, timeouts, 5xx, 429, bad key) the provider is paused: calls return **503** with `Retry-After` instead of waiting on a failing service. After the cooldown one trial call goes through; success resumes normal traffic, failure pauses it again. A 400/413/422 is about that one request and doesn't count. `GET /api/providers` includes each breaker's state, and `/metrics` counts limited requests (`polyql_rate_limited_total`) and breaker trips (`polyql_circuit_open_total`).
+
+| Variable | Default | |
+|---|---|---|
+| `POLYQL_RATE_LIMIT_PER_MIN` | `30` | Sustained requests per user per minute (`0` disables) |
+| `POLYQL_RATE_LIMIT_BURST` | `10` | Requests allowed back to back |
+| `POLYQL_BREAKER_FAILURES` | `5` | Consecutive failures that pause a provider (`0` disables) |
+| `POLYQL_BREAKER_COOLDOWN_S` | `60` | Seconds a paused provider waits before a trial call |
+
+Both are in-process: with several worker processes each one keeps its own counts.
+
 ### Tuning the requirement-gathering loop
 
 The assistant fetches table schemas in an agentic loop before generating a query. The max number of schema-fetch calls per turn is configurable in `Utilities/retrieval_config.YAML`:

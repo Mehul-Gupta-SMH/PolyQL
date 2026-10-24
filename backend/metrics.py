@@ -34,6 +34,10 @@ class _Metrics:
         # {provider: count}
         self._llm_calls: dict = defaultdict(int)
         self._llm_errors: dict = defaultdict(int)
+        # {provider: times the circuit breaker tripped open}
+        self._circuit_open: dict = defaultdict(int)
+        # {route: count}
+        self._rate_limited: dict = defaultdict(int)
 
     # ------------------------------------------------------------------
     # Record helpers (called from middleware / endpoint handlers)
@@ -56,6 +60,14 @@ class _Metrics:
             if error:
                 self._llm_errors[provider] += 1
 
+    def record_rate_limited(self, route: str) -> None:
+        with self._lock:
+            self._rate_limited[route] += 1
+
+    def record_circuit_open(self, provider: str) -> None:
+        with self._lock:
+            self._circuit_open[provider] += 1
+
     # ------------------------------------------------------------------
     # Prometheus text format renderer
     # ------------------------------------------------------------------
@@ -73,6 +85,8 @@ class _Metrics:
             hist_snap = dict(self._latency_hist)
             llm_calls_snap = dict(self._llm_calls)
             llm_err_snap = dict(self._llm_errors)
+            circuit_snap = dict(self._circuit_open)
+            rate_limited_snap = dict(self._rate_limited)
 
         for (method, path, status), count in sorted(req_snapshot.items()):
             lines.append(
@@ -115,6 +129,18 @@ class _Metrics:
         for provider, count in sorted(llm_err_snap.items()):
             lines.append(f'polyql_llm_errors_total{{provider="{provider}"}} {count}')
 
+        lines.append("")
+        lines.append("# HELP polyql_rate_limited_total Requests rejected by the rate limiter, by route")
+        lines.append("# TYPE polyql_rate_limited_total counter")
+        for route, count in sorted(rate_limited_snap.items()):
+            lines.append(f'polyql_rate_limited_total{{route="{route}"}} {count}')
+
+        lines.append("")
+        lines.append("# HELP polyql_circuit_open_total Times a provider circuit breaker tripped open")
+        lines.append("# TYPE polyql_circuit_open_total counter")
+        for provider, count in sorted(circuit_snap.items()):
+            lines.append(f'polyql_circuit_open_total{{provider="{provider}"}} {count}')
+
         return "\n".join(lines) + "\n"
 
     def reset(self) -> None:
@@ -126,6 +152,8 @@ class _Metrics:
             self._latency_hist.clear()
             self._llm_calls.clear()
             self._llm_errors.clear()
+            self._circuit_open.clear()
+            self._rate_limited.clear()
 
 
 # Singleton instance — import and use this directly

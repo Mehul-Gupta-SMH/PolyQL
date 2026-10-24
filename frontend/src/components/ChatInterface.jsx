@@ -288,6 +288,17 @@ export default function ChatInterface({ providers }) {
         return
       }
 
+      if (res.status === 429) {
+        const secs = parseInt(res.headers?.get?.('Retry-After'), 10)
+        const wait = Number.isFinite(secs) && secs > 0 ? `${secs} s` : 'a moment'
+        setMessages((prev) => prev.map((m) =>
+          m.id === streamId
+            ? { ...m, type: 'error', content: `Too many requests — try again in ${wait}.`, retryQuery: retryLabel }
+            : m
+        ))
+        return
+      }
+
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}))
         setMessages((prev) => prev.map((m) =>

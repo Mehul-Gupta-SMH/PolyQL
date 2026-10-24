@@ -865,6 +865,15 @@ def generate_sql(question: str, provider: str, instance: str = "default",
     detail — content is its question.
     """
     from main import generateQuery
+    from backend.rate_limit import limiter, retry_after_header
+    from backend.metrics import metrics
+
+    allowed, retry = limiter.check("mcp")
+    if not allowed:
+        metrics.record_rate_limited("mcp:generate_sql")
+        secs = retry_after_header(retry)
+        return {"type": "error", "content": "",
+                "error": f"Rate limit exceeded — try again in {secs} s."}
 
     if provider == "claude_code":
         logger.warning("MCP generate_sql: provider claude_code starts a nested Claude Code session")
