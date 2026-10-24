@@ -17,9 +17,11 @@ from fastapi.responses import RedirectResponse, StreamingResponse, PlainTextResp
 from pydantic import BaseModel
 
 from main import generateQuery, generateQueryStream, gatherRequirements, SQLValidationError, _VALID_PROVIDERS
+from APIManager.circuit_breaker import CircuitOpenError, snapshot as _breaker_snapshot
 from backend.auth import get_current_user
 from backend.logging_config import configure_logging
 from backend.metrics import metrics
+from backend.rate_limit import rate_limited
 from backend.glossary import router as glossary_router
 from backend.okf import router as okf_router
 from backend.semantic import router as semantic_router
@@ -49,6 +51,17 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+
+@app.exception_handler(CircuitOpenError)
+async def _circuit_open_handler(request: Request, exc: CircuitOpenError):
+    """A provider's circuit breaker is open: 503 with Retry-After."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(exc)},
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+    )
 
 
 @app.middleware("http")
@@ -259,7 +272,13 @@ def get_metrics():
 
 @app.get("/api/providers")
 def get_providers():
-    return {"providers": sorted(_VALID_PROVIDERS)}
+    states = _breaker_snapshot()
+    idle = {"state": "closed", "failures": 0, "retry_after": 0.0}
+    return {
+        "providers": sorted(_VALID_PROVIDERS),
+        # additive: circuit-breaker state per provider
+        "breakers": {p: states.get(p.lower(), idle) for p in sorted(_VALID_PROVIDERS)},
+    }
 
 
 @app.get("/api/providers/balance")
@@ -291,7 +310,7 @@ def get_instances():
 
 
 @app.post("/api/chat")
-def post_chat(body: ChatRequest, user: dict = Depends(get_current_user)):
+def post_chat(body: ChatRequest, user: dict = Depends(rate_limited)):
     """
     Two-phase chat endpoint.
 
@@ -310,6 +329,9 @@ def post_chat(body: ChatRequest, user: dict = Depends(get_current_user)):
     except (ValueError, SQLValidationError) as exc:
         metrics.record_llm_call(body.provider, error=True)
         raise HTTPException(status_code=422, detail=str(exc))
+    except CircuitOpenError:
+        metrics.record_llm_call(body.provider, error=True)
+        raise  # -> 503 via _circuit_open_handler
     except Exception as exc:
         metrics.record_llm_call(body.provider, error=True)
         raise HTTPException(status_code=500, detail=f"Requirement gathering failed: {exc}")
@@ -330,6 +352,9 @@ def post_chat(body: ChatRequest, user: dict = Depends(get_current_user)):
     except (ValueError, SQLValidationError) as exc:
         metrics.record_llm_call(body.provider, error=True)
         raise HTTPException(status_code=422, detail=str(exc))
+    except CircuitOpenError:
+        metrics.record_llm_call(body.provider, error=True)
+        raise
     except Exception as exc:
         metrics.record_llm_call(body.provider, error=True)
         raise HTTPException(status_code=500, detail=f"Query generation failed: {exc}")
@@ -342,7 +367,7 @@ def post_chat(body: ChatRequest, user: dict = Depends(get_current_user)):
 
 
 @app.post("/api/chat/stream")
-def post_chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
+def post_chat_stream(body: ChatRequest, user: dict = Depends(rate_limited)):
     """
     Streaming version of /api/chat.
 
@@ -365,6 +390,9 @@ def post_chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
     except (ValueError, SQLValidationError) as exc:
         metrics.record_llm_call(body.provider, error=True)
         raise HTTPException(status_code=422, detail=str(exc))
+    except CircuitOpenError:
+        metrics.record_llm_call(body.provider, error=True)
+        raise  # -> 503 via _circuit_open_handler
     except Exception as exc:
         metrics.record_llm_call(body.provider, error=True)
         raise HTTPException(status_code=500, detail=f"Requirement gathering failed: {exc}")
@@ -410,6 +438,9 @@ def post_chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
         except (ValueError, SQLValidationError) as exc:
             metrics.record_llm_call(body.provider, error=True)
             yield _sse({"event": "error", "detail": str(exc)})
+        except CircuitOpenError as exc:
+            metrics.record_llm_call(body.provider, error=True)
+            yield _sse({"event": "error", "detail": str(exc), "retry_after": exc.retry_after_seconds})
         except Exception as exc:
             metrics.record_llm_call(body.provider, error=True)
             yield _sse({"event": "error", "detail": f"Query generation failed: {exc}"})
@@ -422,7 +453,7 @@ def post_chat_stream(body: ChatRequest, user: dict = Depends(get_current_user)):
 
 
 @app.post("/api/query")
-def post_query(body: QueryRequest, user: dict = Depends(get_current_user)):
+def post_query(body: QueryRequest, user: dict = Depends(rate_limited)):
     try:
         result = generateQuery(body.query, body.provider, body.query_type, model=body.model, instance_name=body.instance_name)
         # result = {"type": "sql"|"code"|"clarify", "content": str}
@@ -433,6 +464,8 @@ def post_query(body: QueryRequest, user: dict = Depends(get_current_user)):
         }
     except (ValueError, SQLValidationError) as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except CircuitOpenError:
+        raise
     except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -534,7 +567,7 @@ def get_schema(instance_name: str = "default"):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/ingest/preview")
-def post_ingest_preview(body: IngestPreviewRequest, user: dict = Depends(get_current_user)):
+def post_ingest_preview(body: IngestPreviewRequest, user: dict = Depends(rate_limited)):
     """
     Parse a data pipeline SQL (INSERT...SELECT or CTAS), look up source table schemas,
     call the LLM to generate the target table data dictionary, and return a preview

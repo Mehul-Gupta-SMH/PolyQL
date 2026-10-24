@@ -526,8 +526,62 @@ def read_instance(instance_name: str = "default") -> tuple:
     return tables, edges, load_unique_columns(instance_name), terms
 
 
-def build_document(instance_name: str = "default", name: str | None = None) -> str:
-    """Export an instance's tables, join graph and glossary as an Ossie YAML document."""
+_SYNONYMS_TAIL = re.compile(r"(?:^|\n\n)Synonyms: ([^\n]*)\.\s*$")
+
+
+def _split_note_body(body: str) -> tuple:
+    """Inverse of the note body built in model_to_polyql: (instructions, synonyms)."""
+    body = (body or "").strip()
+    match = _SYNONYMS_TAIL.search(body)
+    if not match:
+        return body, []
+    synonyms = [s.strip() for s in match.group(1).split(",") if s.strip()]
+    return body[:match.start()].strip(), synonyms
+
+
+def read_model_ai_context(chroma_client, instance_name: str, model_name: str) -> dict | None:
+    """
+    The model-level ai_context to export, rebuilt from the OKF notes an Ossie
+    import stored: bundle `ossie:<model_name>` if present, otherwise every
+    `ossie:*` bundle of the instance (sorted, merged). None when there is none.
+    """
+    from MetadataManager.OKFStore import get_bundle_concepts
+
+    concepts = [c for c in get_bundle_concepts(chroma_client, instance_name)
+                if str(c.get("bundle") or "").startswith("ossie:")]
+    exact = [c for c in concepts if c["bundle"] == f"ossie:{model_name}"]
+    instructions, synonyms = [], []
+    for concept in exact or concepts:
+        text, syns = _split_note_body(concept.get("body") or "")
+        if text:
+            instructions.append(text)
+        synonyms.extend(s for s in syns if s not in synonyms)
+    result = {}
+    if instructions:
+        result["instructions"] = "\n\n".join(instructions)
+    if synonyms:
+        result["synonyms"] = synonyms
+    return result or None
+
+
+def build_document(instance_name: str = "default", name: str | None = None,
+                   chroma_client=None) -> str:
+    """
+    Export an instance's tables, join graph and glossary as an Ossie YAML document.
+    With *chroma_client*, notes stored by an Ossie import are written back as the
+    model's ai_context.
+    """
     tables, edges, unique_columns, terms = read_instance(instance_name)
-    model = build_model(name or f"polyql_{instance_name}", tables, edges, unique_columns, terms)
+    model_name = name or f"polyql_{instance_name}"
+    model = build_model(model_name, tables, edges, unique_columns, terms)
+    if chroma_client is not None:
+        try:
+            context = read_model_ai_context(chroma_client, instance_name, model_name)
+        except Exception as exc:
+            logger.warning("Ossie export: could not read model notes (%s); exporting without ai_context", exc)
+            context = None
+        if context:
+            # Right after `name`, where Ossie documents usually carry it
+            model = {k: v for k, v in model.items() if k in ("version", "name")} | {"ai_context": context} | {
+                k: v for k, v in model.items() if k not in ("version", "name")}
     return yaml.safe_dump(model, sort_keys=False, allow_unicode=True)

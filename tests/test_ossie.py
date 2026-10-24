@@ -244,6 +244,72 @@ class TestModelNotes:
         assert OKFStore.resolve_tables(names, known) == ["store_sales", "customer", "recent"]
 
 
+class _NotesClient:
+    """ChromaDB stand-in holding OKF note metadata rows."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def get_collection(self, name):
+        rows = self.rows
+
+        class Coll:
+            def get(self, where=None, include=None):
+                hits = [r for r in rows if all(r.get(k) == v for k, v in (where or {}).items())]
+                return {"ids": [str(i) for i in range(len(hits))], "metadatas": hits}
+        return Coll()
+
+
+def _note_row(model, body, instance="prod"):
+    return {"instance_name": instance, "bundle": f"ossie:{model}",
+            "concept_id": f"ossie/{model}", "type": "note", "body": body}
+
+
+class TestExportAiContext:
+    def _export(self, client, name="retail"):
+        tables = {"orders": {"desc": "", "columns": [("id", "INTEGER", "PRIMARY KEY", "", "")]}}
+        with patch.object(O, "read_instance", return_value=(tables, [], {("orders", "id")}, [])):
+            return O.build_document("prod", name, client)
+
+    def test_exact_bundle_wins(self):
+        client = _NotesClient([_note_row("retail", "Mine."), _note_row("other", "Not mine.")])
+        doc = yaml.safe_load(self._export(client))
+        assert doc["ai_context"] == {"instructions": "Mine."}
+
+    def test_falls_back_to_all_ossie_bundles(self):
+        client = _NotesClient([_note_row("b", "Second."), _note_row("a", "First."),
+                               {**_note_row("x", "Ignored."), "bundle": "sales"},
+                               _note_row("c", "Other instance.", instance="dev")])
+        doc = yaml.safe_load(self._export(client, name="zzz"))
+        assert doc["ai_context"] == {"instructions": "First.\n\nSecond."}
+
+    def test_synonyms_parsed_back(self):
+        client = _NotesClient([_note_row("retail", "Do x.\n\nSynonyms: s1, s2.")])
+        assert yaml.safe_load(self._export(client))["ai_context"] == {
+            "instructions": "Do x.", "synonyms": ["s1", "s2"]}
+        client = _NotesClient([_note_row("retail", "Synonyms: only.")])
+        assert yaml.safe_load(self._export(client))["ai_context"] == {"synonyms": ["only"]}
+
+    def test_no_notes_or_client_means_no_ai_context(self):
+        assert "ai_context" not in yaml.safe_load(self._export(_NotesClient([])))
+        assert "ai_context" not in yaml.safe_load(self._export(None))
+
+    def test_chroma_error_still_exports(self):
+        client = MagicMock()
+        client.get_collection.return_value.get.side_effect = RuntimeError("boom")
+        assert "ai_context" not in yaml.safe_load(self._export(client))
+
+    @pytest.mark.parametrize("ctx", [{"instructions": "Revenue excludes returns."},
+                                     {"instructions": "A.\n\nB.", "synonyms": ["x", "y"]},
+                                     {"synonyms": ["only"]}])
+    def test_import_export_import_is_stable(self, ctx):
+        first = O.model_to_polyql({"name": "retail", "datasets": [{"name": "a"}], "ai_context": ctx})
+        body = first["notes"][0]["body"]
+        doc = self._export(_NotesClient([_note_row("retail", body)]))
+        (model,) = O.load_models(doc)
+        assert O.model_to_polyql(model)["notes"][0]["body"] == body
+
+
 class TestImportIntoPolyQL:
     def _run(self, **kwargs):
         with patch("backend.ingestion.store_table"), \
@@ -363,7 +429,8 @@ class TestEndpoints:
         assert resp.status_code == 200 and resp.text.startswith("version:")
         assert resp.headers["content-type"].startswith("application/yaml")
         assert 'filename="polyql_prod.ossie.yaml"' in resp.headers["content-disposition"]
-        build.assert_called_once_with("prod", None)
+        build.assert_called_once()
+        assert build.call_args.args[:2] == ("prod", None)
 
     def test_requires_auth(self, client):
         from backend.app import app

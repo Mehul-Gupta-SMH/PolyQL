@@ -51,8 +51,15 @@ def _reset_shared_state():
     from MetadataManager import retrieval_cache
     from MetadataManager.MetadataStore import shared_models
 
+    from backend import rate_limit
+    from APIManager import circuit_breaker
+
     retrieval_cache.clear()
     shared_models.reset()
+    rate_limit.reset()
+    circuit_breaker.reset()
     yield
     retrieval_cache.clear()
     shared_models.reset()
+    rate_limit.reset()
+    circuit_breaker.reset()
