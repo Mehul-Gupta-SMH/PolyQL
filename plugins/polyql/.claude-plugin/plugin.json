@@ -1,0 +1,55 @@
+{
+  "name": "polyql",
+  "displayName": "Poly-QL",
+  "version": "0.1.0",
+  "description": "Write SQL with Poly-QL's schema knowledge: table search, join paths, business definitions, knowledge notes, SQL validation and optional read-only execution.",
+  "author": { "name": "Mehul Gupta", "url": "https://github.com/Mehul-Gupta-SMH" },
+  "homepage": "https://github.com/Mehul-Gupta-SMH/PolyQL/blob/master/docs/plugins.md",
+  "repository": "https://github.com/Mehul-Gupta-SMH/PolyQL",
+  "keywords": ["sql", "mcp", "schema", "text-to-sql"],
+  "mcpServers": {
+    "polyql": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/polyql-mcp",
+      "args": [],
+      "env": {
+        "POLYQL_HOME": "${user_config.polyql_home}",
+        "POLYQL_PYTHON": "${user_config.python}",
+        "POLYQL_MCP_ENABLE_GENERATE": "${user_config.enable_generate}",
+        "POLYQL_MCP_DB": "${user_config.db_url}"
+      }
+    }
+  },
+  "userConfig": {
+    "polyql_home": {
+      "type": "string",
+      "title": "Poly-QL checkout",
+      "description": "Path to your Poly-QL clone (the folder with backend/mcp_server.py). Leave empty when the plugin runs from the clone itself.",
+      "default": ""
+    },
+    "python": {
+      "type": "string",
+      "title": "Python interpreter",
+      "description": "Python that has Poly-QL's dependencies and mcp installed. Leave empty to use <checkout>/.venv, then python3.",
+      "default": ""
+    },
+    "instance": {
+      "type": "string",
+      "title": "Default instance",
+      "description": "Database instance the commands use when you do not name one. Leave empty for 'default' (all instances).",
+      "default": ""
+    },
+    "enable_generate": {
+      "type": "string",
+      "title": "Enable generate_sql",
+      "description": "Set to 1 to expose generate_sql, which calls Poly-QL's own LLM pipeline and costs tokens. Leave empty to keep it off.",
+      "default": ""
+    },
+    "db_url": {
+      "type": "string",
+      "title": "Database URL for execute_sql",
+      "description": "Read-only connection URL (POLYQL_MCP_DB), e.g. postgresql://readonly@host/db. Leave empty to keep execute_sql off.",
+      "default": "",
+      "sensitive": true
+    }
+  }
+}

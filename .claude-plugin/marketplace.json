@@ -1,0 +1,13 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "polyql",
+  "description": "Poly-QL schema knowledge for coding agents: table search, join paths, business definitions, SQL validation.",
+  "owner": { "name": "Mehul Gupta", "url": "https://github.com/Mehul-Gupta-SMH" },
+  "plugins": [
+    {
+      "name": "polyql",
+      "source": "./plugins/polyql",
+      "description": "Poly-QL MCP server, the polyql-sql skill and /polyql:* commands for writing SQL against your ingested schema."
+    }
+  ]
+}
