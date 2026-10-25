@@ -64,7 +64,8 @@ Guidelines and context for AI-assisted development on this project.
 - `conftest.py` pre-mocks heavy ML packages (torch, chromadb, sentence-transformers, FlagEmbedding, sqlalchemy, pyvis)
 - `requirements-ci.txt` installs the lightweight runtime deps CI needs (requests, kuzu, PyJWT, etc.)
 - Run all tests: `pytest tests/` (an autouse fixture clears the retrieval cache and shared models between tests)
-- Lint: `python -m ruff check backend/ tests/ validation/` (runs in CI before tests)
+- Lint: `python -m ruff check backend/ tests/ validation/ scripts/` (CI `Lint` job, gates the test jobs)
+- `python scripts/check_ci_requirements.py` — `requirements-ci.txt` must stay in sync with `pyproject.toml` (also in the `Lint` job); add a new runtime dep to both, or to the script's allow-list with a reason
 
 ## Rate limits and circuit breakers
 
@@ -134,3 +135,4 @@ Guidelines and context for AI-assisted development on this project.
 | 2026-10-24 | `MetadataManager/OssieStore.py`, `OKFStore.py`, `backend/semantic.py`, `docs/ossie.md`, `tests/test_ossie.py`, `tests/test_okf_store.py` | #30: Ossie export writes model-level `ai_context` back from the OKF notes; `OKFStore.get_bundle_concepts()`; 11 new tests |
 | 2026-10-24 | `backend/rate_limit.py`, `backend/app.py`, `backend/mcp_server.py`, `backend/metrics.py`, `frontend/…/ChatInterface.jsx`, `tests/test_rate_limit.py` | A4: per-user token-bucket rate limit on LLM routes + MCP `generate_sql`, 429 + Retry-After, metric; 19 new tests + 1 Vitest |
 | 2026-10-24 | `APIManager/circuit_breaker.py`, `APIManager/AllAPICaller.py`, `backend/app.py`, `backend/metrics.py`, `tests/test_circuit_breaker.py` | B1: per-provider circuit breakers (503 + Retry-After, half-open trial, 400/413/422 neutral), `/api/providers` breaker state, metric; 34 new tests (551 total) |
+| 2026-10-25 | `.github/workflows/ci.yml`, `scripts/check_ci_requirements.py`, `pyproject.toml`, `tests/test_check_ci_requirements.py` | CI4/CI5/CI7: parallel Lint → Backend/Frontend test jobs, non-blocking pip-audit/npm audit, requirements sync check; PyJWT declared in pyproject; 9 new tests |

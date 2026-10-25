@@ -40,6 +40,9 @@ dependencies = [
     "PyYAML>=6.0",
     "python-dotenv>=1.0",
     "sqlalchemy>=2.0",
+
+    # Auth (backend/auth.py)
+    "PyJWT>=2.8",
 ]
 
 [project.optional-dependencies]
