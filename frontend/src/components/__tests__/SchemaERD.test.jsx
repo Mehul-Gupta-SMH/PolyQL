@@ -138,3 +138,68 @@ describe('SchemaERD business terms', () => {
     expect(screen.getByText('customers')).toBeInTheDocument()
   })
 })
+
+describe('SchemaERD search and filter', () => {
+  it('searches columns, dims non-matches and selects the table on click', async () => {
+    const { container } = await renderERD()
+    const box = screen.getByRole('searchbox')
+    fireEvent.change(box, { target: { value: 'customer_id' } })
+    const opt = (await screen.findAllByRole('option')).find((o) => o.tagName === 'LI')
+    expect(opt).toHaveTextContent('orders.customer_id')
+    const dimmed = () => [...container.querySelectorAll('.react-flow__node')].filter((n) => n.style.opacity === '0.25')
+    await waitFor(() => expect(dimmed()).toHaveLength(3))
+    fireEvent.click(opt)
+    expect(await screen.findByText('Column')).toBeInTheDocument() // side pane open
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+  })
+
+  it('Enter selects the first match and Esc clears the query', async () => {
+    await renderERD()
+    const box = screen.getByRole('searchbox')
+    fireEvent.change(box, { target: { value: 'dim_' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(await screen.findByText('Column')).toBeInTheDocument()
+    fireEvent.change(box, { target: { value: 'zzz' } })
+    expect(await screen.findByText('No matches')).toBeInTheDocument()
+    fireEvent.keyDown(box, { key: 'Escape' })
+    expect(box.value).toBe('')
+  })
+
+  it('hides non-neighbours and their edges with the neighbours-only toggle', async () => {
+    const { container } = await renderERD()
+    const nodeIds = () => [...container.querySelectorAll('.react-flow__node')].filter((n) => n.style.visibility !== 'hidden').map((n) => n.dataset.id)
+    const neighbours = screen.getByLabelText('Neighbours only')
+    expect(neighbours).toBeDisabled()
+    fireEvent.click(screen.getByText('customers'))
+    await waitFor(() => expect(neighbours).not.toBeDisabled())
+    fireEvent.click(neighbours)
+    await waitFor(() => expect(nodeIds().sort()).toEqual(['customers', 'orders']))
+    expect(screen.queryByText('n:m')).not.toBeInTheDocument() // orders->dim_date edge hidden
+    expect(screen.getByText('n:1')).toBeInTheDocument()
+  })
+
+  it('filters by schema prefix chips and keeps the term toggle working', async () => {
+    const schema = {
+      tables: [
+        { name: 'sales.orders', description: '', columns: [col('id')] },
+        { name: 'hr.people', description: '', columns: [col('id')] },
+      ],
+      relations: [],
+    }
+    globalThis.fetch = vi.fn((url) => Promise.resolve({
+      ok: true, status: 200,
+      json: () => Promise.resolve(url.startsWith('/api/schema') ? schema : url.startsWith('/api/glossary') ? { terms: [
+        { term_id: 'r', term_name: 'Revenue', definition: '', table_deps: ['sales.orders'], instance_name: '' },
+      ] } : { instances: [] }),
+    }))
+    const { container } = render(<SchemaERD />)
+    await screen.findByText('hr.people')
+    fireEvent.click(screen.getByLabelText('Show business terms'))
+    expect(await screen.findByText('Revenue')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^hr \(1\)/ }))
+    const shown = () => [...container.querySelectorAll('.react-flow__node')].filter((n) => n.style.visibility !== 'hidden').map((n) => n.dataset.id)
+    await waitFor(() => expect(shown()).toEqual(['hr.people'])) // term of a hidden table goes too
+    fireEvent.click(screen.getByRole('button', { name: /^hr \(1\)/ }))
+    await waitFor(() => expect(shown()).toHaveLength(3))
+  })
+})

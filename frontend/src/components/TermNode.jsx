@@ -22,7 +22,7 @@ export default function TermNode({ data }) {
       }}
     >
       {data.label}
-      <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
+      <Handle id="out" type="source" position={Position.Left} style={{ opacity: 0 }} />
     </div>
   )
 }
