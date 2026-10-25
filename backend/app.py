@@ -13,6 +13,7 @@ import json as _json
 
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import RedirectResponse, StreamingResponse, PlainTextResponse
 from pydantic import BaseModel
 
@@ -367,7 +368,7 @@ def post_chat(body: ChatRequest, user: dict = Depends(rate_limited)):
 
 
 @app.post("/api/chat/stream")
-def post_chat_stream(body: ChatRequest, user: dict = Depends(rate_limited)):
+def post_chat_stream(body: ChatRequest, request: Request, user: dict = Depends(rate_limited)):
     """
     Streaming version of /api/chat.
 
@@ -415,16 +416,28 @@ def post_chat_stream(body: ChatRequest, user: dict = Depends(rate_limited)):
 
         return StreamingResponse(_clarify_gen(), media_type="text/event-stream")
 
-    def _stream_gen():
+    _done = object()
+
+    async def _stream_gen():
+        # The LLM generator is sync (blocking HTTP); pull each chunk in the
+        # threadpool so we can check for a client disconnect (Stop button)
+        # between chunks and close the upstream generator, which closes the
+        # provider's HTTP stream. A stop is not an outcome: no metric recorded.
+        upstream = generateQueryStream(
+            gather["summary"],
+            body.provider,
+            body.query_type,
+            messages,
+            model=body.model,
+            instance_name=body.instance_name,
+        )
         try:
-            for chunk in generateQueryStream(
-                gather["summary"],
-                body.provider,
-                body.query_type,
-                messages,
-                model=body.model,
-                instance_name=body.instance_name,
-            ):
+            while True:
+                if await request.is_disconnected():
+                    return
+                chunk = await run_in_threadpool(next, upstream, _done)
+                if chunk is _done:
+                    break
                 if chunk["event"] == "token":
                     yield _sse({"event": "token", "data": chunk["data"]})
                 elif chunk["event"] == "done":
@@ -444,6 +457,11 @@ def post_chat_stream(body: ChatRequest, user: dict = Depends(rate_limited)):
         except Exception as exc:
             metrics.record_llm_call(body.provider, error=True)
             yield _sse({"event": "error", "detail": f"Query generation failed: {exc}"})
+        finally:
+            try:
+                upstream.close()
+            except ValueError:
+                pass  # a chunk is still being produced in the worker thread
 
     return StreamingResponse(
         _stream_gen(),

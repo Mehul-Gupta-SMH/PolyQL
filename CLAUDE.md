@@ -31,7 +31,7 @@ Guidelines and context for AI-assisted development on this project.
 
 - Vite + React (`frontend/`)
 - Run: `npm run dev` from `frontend/`
-- Sessions stored in `localStorage` under `poly_ql_sessions` (max 30)
+- Sessions saved per user via `/api/sessions` (SQLite, max 30 in the UI); only the JWT lives in `localStorage` (`poly_ql_token`). Export/import logic: `frontend/src/utils/sessionExport.js`
 
 ---
 
@@ -136,3 +136,4 @@ Guidelines and context for AI-assisted development on this project.
 | 2026-10-24 | `backend/rate_limit.py`, `backend/app.py`, `backend/mcp_server.py`, `backend/metrics.py`, `frontend/…/ChatInterface.jsx`, `tests/test_rate_limit.py` | A4: per-user token-bucket rate limit on LLM routes + MCP `generate_sql`, 429 + Retry-After, metric; 19 new tests + 1 Vitest |
 | 2026-10-24 | `APIManager/circuit_breaker.py`, `APIManager/AllAPICaller.py`, `backend/app.py`, `backend/metrics.py`, `tests/test_circuit_breaker.py` | B1: per-provider circuit breakers (503 + Retry-After, half-open trial, 400/413/422 neutral), `/api/providers` breaker state, metric; 34 new tests (551 total) |
 | 2026-10-25 | `.github/workflows/ci.yml`, `scripts/check_ci_requirements.py`, `pyproject.toml`, `tests/test_check_ci_requirements.py` | CI4/CI5/CI7: parallel Lint → Backend/Frontend test jobs, non-blocking pip-audit/npm audit, requirements sync check; PyJWT declared in pyproject; 9 new tests |
+| 2026-10-25 | `backend/app.py`, `main.py`, `frontend/…/ChatInterface.jsx`, `ChatMessage.jsx`, `frontend/src/utils/sessionExport.js`, `tests/test_chat_stream_stop.py` | U2: Stop button (abort + `stopped` bubble), stream endpoint stops on client disconnect and closes the LLM generator; U3: session export (JSON/Markdown) and JSON import; 2 backend tests + 16 Vitest |

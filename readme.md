@@ -66,7 +66,8 @@ Ask *"Which customers placed the most orders last quarter?"* and get a ready-to-
 | **Use from your agent (MCP)** | `python backend/mcp_server.py` exposes table search, join paths, glossary, OKF notes and SQL validation as MCP tools for Claude Code, Codex and agent frameworks — the agent writes the SQL, no extra API key. See [docs/mcp.md](docs/mcp.md) |
 | **Observability** | JSON-structured request logs and a `GET /metrics` Prometheus endpoint for request latencies, error rates, and LLM call counts per provider |
 | **User accounts** | Login / register with username + password, or **Sign in with Google** |
-| **Session history** | Conversations are saved per user and accessible across sessions |
+| **Session history** | Conversations are saved per user and accessible across sessions; export a session as JSON or Markdown and import a JSON export back |
+| **Stop generation** | While a query streams, Send becomes **Stop** (or press Esc); the partial answer is kept and the backend stops reading from the LLM |
 
 ---
 
@@ -243,6 +244,8 @@ Poly-QL can run as an MCP server, so coding agents and agent frameworks get its 
 pip install "mcp>=2.2,<3"
 claude mcp add polyql -- python /path/to/PolyQL/backend/mcp_server.py   # Claude Code
 ```
+
+Or install it as a plugin (server, skill and `/polyql:sql`, `/polyql:schema`, `/polyql:explain-join`): `/plugin marketplace add Mehul-Gupta-SMH/PolyQL`, then `/plugin install polyql@polyql`. Codex setup is in [docs/plugins.md](docs/plugins.md).
 
 Tools: `list_instances`, `list_tables`, `search_schema`, `get_table_schema`, `find_join_path`, `get_business_terms`, `get_lineage`, `get_derivatives`, `validate_sql` (tables and qualified columns). None of these calls an LLM; the agent writes the SQL. Two tools are opt-in: `execute_sql` runs read-only `SELECT`s against a connection the operator configures, and `generate_sql` uses Poly-QL's own LLM pipeline. The HTTP transport supports bearer-token auth. Setup for Codex, HTTP, the Claude Agent SDK, the OpenAI Agents SDK and LangGraph is in [docs/mcp.md](docs/mcp.md).
 
