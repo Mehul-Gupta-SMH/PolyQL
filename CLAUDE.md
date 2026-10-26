@@ -25,13 +25,13 @@ Guidelines and context for AI-assisted development on this project.
 - Business logic: `main.py` (`gatherRequirements`, `generateQuery`, `generate_pipeline_dict`)
 - Balance checks: `backend/balance.py` — concurrent, one checker per provider
 - Run: `uvicorn backend.app:app --reload` from project root
-- MCP server: `python -m backend.mcp_server` (stdio) or `--transport streamable-http` (bearer auth via `POLYQL_MCP_TOKEN` / `JWT_SECRET`; refuses non-local hosts without auth). Context tools never call an LLM; `execute_sql` needs `POLYQL_MCP_DB[_<INSTANCE>]` and is read-only; `generate_sql` needs `--enable-generate`. See `docs/mcp.md`. Uses MCP SDK v2 (`from mcp.server.mcpserver import MCPServer`; v1 `FastMCP` no longer exists)
+- MCP server: `python -m backend.mcp_server` (stdio) or `--transport streamable-http` (bearer auth via `POLYQL_MCP_TOKEN` / `JWT_SECRET`; refuses non-local hosts without auth). Context tools never call an LLM; `execute_sql` needs `POLYQL_MCP_DB[_<INSTANCE>]` and is read-only; `generate_sql` needs `--enable-generate`. Packaged as a Claude Code + Codex plugin in `plugins/polyql/` (marketplaces `.claude-plugin/marketplace.json`, `.agents/plugins/marketplace.json`; launcher `plugins/polyql/bin/polyql-mcp`; skill `plugins/polyql/skills/polyql-sql/`) — see `docs/plugins.md`; keep both plugin manifests' versions in step. See `docs/mcp.md`. Uses MCP SDK v2 (`from mcp.server.mcpserver import MCPServer`; v1 `FastMCP` no longer exists)
 
 ## Frontend
 
 - Vite + React (`frontend/`)
 - Run: `npm run dev` from `frontend/`
-- Sessions stored in `localStorage` under `poly_ql_sessions` (max 30)
+- Sessions saved per user via `/api/sessions` (SQLite, max 30 in the UI); only the JWT lives in `localStorage` (`poly_ql_token`). Export/import logic: `frontend/src/utils/sessionExport.js`
 
 ---
 
@@ -64,7 +64,8 @@ Guidelines and context for AI-assisted development on this project.
 - `conftest.py` pre-mocks heavy ML packages (torch, chromadb, sentence-transformers, FlagEmbedding, sqlalchemy, pyvis)
 - `requirements-ci.txt` installs the lightweight runtime deps CI needs (requests, kuzu, PyJWT, etc.)
 - Run all tests: `pytest tests/` (an autouse fixture clears the retrieval cache and shared models between tests)
-- Lint: `python -m ruff check backend/ tests/ validation/` (runs in CI before tests)
+- Lint: `python -m ruff check backend/ tests/ validation/ scripts/` (CI `Lint` job, gates the test jobs)
+- `python scripts/check_ci_requirements.py` — `requirements-ci.txt` must stay in sync with `pyproject.toml` (also in the `Lint` job); add a new runtime dep to both, or to the script's allow-list with a reason
 
 ## Rate limits and circuit breakers
 
@@ -134,3 +135,7 @@ Guidelines and context for AI-assisted development on this project.
 | 2026-10-24 | `MetadataManager/OssieStore.py`, `OKFStore.py`, `backend/semantic.py`, `docs/ossie.md`, `tests/test_ossie.py`, `tests/test_okf_store.py` | #30: Ossie export writes model-level `ai_context` back from the OKF notes; `OKFStore.get_bundle_concepts()`; 11 new tests |
 | 2026-10-24 | `backend/rate_limit.py`, `backend/app.py`, `backend/mcp_server.py`, `backend/metrics.py`, `frontend/…/ChatInterface.jsx`, `tests/test_rate_limit.py` | A4: per-user token-bucket rate limit on LLM routes + MCP `generate_sql`, 429 + Retry-After, metric; 19 new tests + 1 Vitest |
 | 2026-10-24 | `APIManager/circuit_breaker.py`, `APIManager/AllAPICaller.py`, `backend/app.py`, `backend/metrics.py`, `tests/test_circuit_breaker.py` | B1: per-provider circuit breakers (503 + Retry-After, half-open trial, 400/413/422 neutral), `/api/providers` breaker state, metric; 34 new tests (551 total) |
+| 2026-10-25 | `.github/workflows/ci.yml`, `scripts/check_ci_requirements.py`, `pyproject.toml`, `tests/test_check_ci_requirements.py` | CI4/CI5/CI7: parallel Lint → Backend/Frontend test jobs, non-blocking pip-audit/npm audit, requirements sync check; PyJWT declared in pyproject; 9 new tests |
+| 2026-10-25 | `backend/app.py`, `main.py`, `frontend/…/ChatInterface.jsx`, `ChatMessage.jsx`, `frontend/src/utils/sessionExport.js`, `tests/test_chat_stream_stop.py` | U2: Stop button (abort + `stopped` bubble), stream endpoint stops on client disconnect and closes the LLM generator; U3: session export (JSON/Markdown) and JSON import; 2 backend tests + 16 Vitest |
+| 2026-10-25 | `frontend/…/SchemaERD.jsx`, `TableNode.jsx`, `TermNode.jsx`, `frontend/src/utils/erdModel.js` | U1: ERD search (tables/columns, centre on select), schema/tag filter chips, neighbours-only; minimap hidden with pane open, term nodes in a non-overlapping band, straight term links |
+| 2026-10-25 | `.claude-plugin/`, `.agents/plugins/`, `plugins/polyql/`, `pyproject.toml`, `docs/plugins.md`, `docs/mcp.md`, `readme.md`, `tests/test_plugin_manifest.py` | Claude Code + Codex plugin (MCP server, `polyql-sql` skill moved from `docs/agent-skill/`, `/polyql:*` commands, launcher); `polyql-mcp` console script; build backend fixed; 14 new tests (576 total) |

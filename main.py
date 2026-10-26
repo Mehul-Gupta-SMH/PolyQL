@@ -448,9 +448,17 @@ def generateQueryStream(
     LLMObj = CallLLMApi(LLMservice, model=model)
 
     accumulated = []
-    for token in LLMObj.CallServiceStream(prompt):
-        accumulated.append(token)
-        yield {"event": "token", "data": token}
+    upstream = LLMObj.CallServiceStream(prompt)
+    try:
+        for token in upstream:
+            accumulated.append(token)
+            yield {"event": "token", "data": token}
+    finally:
+        # Consumer stopped early (client Stop) -> close the LLM stream now
+        # instead of waiting for garbage collection.
+        close = getattr(upstream, "close", None)
+        if close:
+            close()
 
     full_response = "".join(accumulated)
 

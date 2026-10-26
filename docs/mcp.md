@@ -44,13 +44,15 @@ The embedding model, reranker and ChromaDB load on the first `search_schema` or 
 
 ## Claude Code
 
-A ready-made skill teaches the agent the workflow: search, then join paths, then write, then validate, then optionally run. Copy it into your project:
+**Easiest: install the plugin** (MCP server, skill and `/polyql:*` commands in one step): see [plugins.md](plugins.md).
+
+By hand, a ready-made skill teaches the agent the workflow: search, then join paths, then write, then validate, then optionally run. Copy it into your project:
 
 ```bash
-mkdir -p .claude/skills && cp -r /path/to/PolyQL/docs/agent-skill/polyql-sql .claude/skills/
+mkdir -p .claude/skills && cp -r /path/to/PolyQL/plugins/polyql/skills/polyql-sql .claude/skills/
 ```
 
-For other agents (Codex, an `AGENTS.md`), paste the **Workflow** section of [`docs/agent-skill/polyql-sql/SKILL.md`](agent-skill/polyql-sql/SKILL.md) into your instructions.
+For other agents (Codex, an `AGENTS.md`), paste the **Workflow** section of [`plugins/polyql/skills/polyql-sql/SKILL.md`](../plugins/polyql/skills/polyql-sql/SKILL.md) into your instructions.
 
 
 ```bash
@@ -74,7 +76,7 @@ Use the Python interpreter from Poly-QL's virtualenv if it has one, e.g. `/path/
 
 ## Codex
 
-In `~/.codex/config.toml`:
+Plugin, `codex mcp add` one-liner and skill setup are in [plugins.md](plugins.md#codex). By hand, in `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.polyql]

@@ -1,0 +1,35 @@
+{
+  "name": "polyql",
+  "version": "0.1.0",
+  "description": "Write SQL with Poly-QL's schema knowledge: the Poly-QL MCP server and the polyql-sql skill. Set POLYQL_HOME to your Poly-QL clone (see docs/plugins.md).",
+  "author": {
+    "name": "Mehul Gupta",
+    "url": "https://github.com/Mehul-Gupta-SMH"
+  },
+  "homepage": "https://github.com/Mehul-Gupta-SMH/PolyQL/blob/master/docs/plugins.md",
+  "repository": "https://github.com/Mehul-Gupta-SMH/PolyQL",
+  "keywords": [
+    "sql",
+    "mcp",
+    "schema",
+    "text-to-sql"
+  ],
+  "skills": "./skills/",
+  "mcpServers": {
+    "polyql": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "exec ./bin/polyql-mcp"
+      ],
+      "cwd": ".",
+      "env_vars": [
+        "POLYQL_HOME",
+        "POLYQL_PYTHON",
+        "POLYQL_MCP_DB",
+        "POLYQL_MCP_ENABLE_GENERATE"
+      ],
+      "startup_timeout_sec": 60
+    }
+  }
+}

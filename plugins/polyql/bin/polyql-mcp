@@ -1,0 +1,73 @@
+#!/bin/sh
+# Launch the Poly-QL MCP server (stdio by default; extra args are passed through,
+# e.g. --transport streamable-http or --help).
+#
+# Used by the Claude Code plugin (.claude-plugin/plugin.json), the Codex setup and
+# anywhere an agent harness needs one command that starts the server.
+#
+# Where is Poly-QL?   $POLYQL_HOME if set; otherwise the clone this script lives in
+#                     (plugins/polyql/bin/ -> repo root). An installed plugin is a
+#                     copy in the plugin cache, so set POLYQL_HOME there.
+# Which Python?       $POLYQL_PYTHON; else <home>/.venv or <home>/venv; else
+#                     $VIRTUAL_ENV; else python3, then python.
+# generate_sql:       --enable-generate is added when POLYQL_MCP_ENABLE_GENERATE is
+#                     1/true/yes.
+
+# Empty variables come from unset plugin options: treat them as unset.
+for v in POLYQL_HOME POLYQL_PYTHON POLYQL_MCP_ENABLE_GENERATE POLYQL_MCP_DB; do
+    eval "val=\${$v-}"
+    [ -z "$val" ] && unset "$v"
+done
+
+is_home() { [ -f "$1/backend/mcp_server.py" ]; }
+
+if [ -n "${POLYQL_HOME-}" ]; then
+    home=$POLYQL_HOME
+    if ! is_home "$home"; then
+        echo "polyql-mcp: POLYQL_HOME=$home has no backend/mcp_server.py" >&2
+        exit 1
+    fi
+else
+    # Resolve symlinks so a linked launcher still finds the clone.
+    src=$0
+    while [ -L "$src" ]; do
+        link=$(readlink "$src")
+        case $link in /*) src=$link ;; *) src=$(dirname "$src")/$link ;; esac
+    done
+    dir=$(cd "$(dirname "$src")" && pwd -P)
+    home=
+    while [ "$dir" != "/" ]; do
+        if is_home "$dir"; then home=$dir; break; fi
+        dir=$(dirname "$dir")
+    done
+    if [ -z "$home" ]; then
+        echo "polyql-mcp: cannot find the Poly-QL checkout (backend/mcp_server.py)." >&2
+        echo "polyql-mcp: set POLYQL_HOME to your clone, e.g. export POLYQL_HOME=~/PolyQL" >&2
+        exit 1
+    fi
+fi
+
+if [ -n "${POLYQL_PYTHON-}" ]; then
+    py=$POLYQL_PYTHON
+elif [ -x "$home/.venv/bin/python" ]; then
+    py=$home/.venv/bin/python
+elif [ -x "$home/venv/bin/python" ]; then
+    py=$home/venv/bin/python
+elif [ -n "${VIRTUAL_ENV-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+    py=$VIRTUAL_ENV/bin/python
+elif command -v python3 >/dev/null 2>&1; then
+    py=python3
+elif command -v python >/dev/null 2>&1; then
+    py=python
+else
+    echo "polyql-mcp: no Python found; set POLYQL_PYTHON" >&2
+    exit 1
+fi
+
+case $(printf %s "${POLYQL_MCP_ENABLE_GENERATE-}" | tr 'A-Z' 'a-z') in
+    1|true|yes) set -- --enable-generate "$@" ;;
+esac
+unset POLYQL_MCP_ENABLE_GENERATE
+
+cd "$home" || exit 1
+exec "$py" -m backend.mcp_server "$@"

@@ -15,7 +15,7 @@ export function tableNodes(tables) {
     type: 'tableNode',
     position: { x: 0, y: 0 },
     width: NODE_WIDTH,
-    data: { label: t.name, description: t.description, columns: t.columns },
+    data: { label: t.name, description: t.description, columns: t.columns, tags: t.tags, domain: t.domain },
   }))
 }
 
@@ -88,16 +88,28 @@ export function termInInstance(term, instance) {
   return own === '' || own === instance
 }
 
+export const TERM_GAP = 140
+export const TERM_ROW = 56
+
+/** Rendered height of a table node (matches the dagre estimate in SchemaERD). */
+export function tableHeight(node) {
+  return 60 + (node.data?.columns?.length || 0) * 28
+}
+
 /**
- * Term annotation nodes, placed in a column above the first table they link to,
- * plus dotted edges to each table. Terms with no table on the diagram are
- * counted in `omitted` instead.
+ * Term annotation nodes, placed in their own column to the right of the table
+ * layout's bounding box. Each term sits at the mean height of the tables it
+ * links to (so a term on two tables draws short straight links), then the column
+ * is stacked top to bottom without overlap. Terms with no table on the diagram
+ * are counted in `omitted` instead.
  */
 export function termElements(terms, tableNodeList) {
   const names = tableNodeList.map((n) => n.id)
-  const pos = new Map(tableNodeList.map((n) => [n.id, n.position]))
-  const stacked = new Map()
-  const nodes = []
+  const byId = new Map(tableNodeList.map((n) => [n.id, n]))
+  const bandX = tableNodeList.length
+    ? Math.max(...tableNodeList.map((n) => n.position.x + NODE_WIDTH)) + TERM_GAP
+    : 0
+  const wanted = []
   const edges = []
   const tablesByTerm = {}
   let omitted = 0
@@ -105,28 +117,109 @@ export function termElements(terms, tableNodeList) {
   for (const term of terms) {
     const tables = resolveTermTables(term, names)
     if (!tables.length) { omitted += 1; continue }
-    const home = tables[0]
-    const k = stacked.get(home) || 0
-    stacked.set(home, k + 1)
     const id = `term:${term.term_id}`
     tablesByTerm[id] = tables
-    nodes.push({
-      id,
-      type: 'termNode',
-      position: { x: pos.get(home).x, y: pos.get(home).y - TERM_STEP * (k + 1) },
-      data: { label: term.term_name, term, tables },
+    const ys = tables.map((t) => byId.get(t).position.y + tableHeight(byId.get(t)) / 2)
+    wanted.push({
+      id, term, tables, y: ys.reduce((a, b) => a + b, 0) / ys.length,
     })
     tables.forEach((t) => edges.push({
       id: `${id}->${t}`,
       source: id,
       target: t,
+      sourceHandle: 'out',
       targetHandle: 'term',
-      type: 'default',
+      type: 'straight',
       selectable: false,
       style: { stroke: EDGE_COLORS.term, strokeWidth: 1, strokeDasharray: '2 4' },
     }))
   }
+
+  wanted.sort((a, b) => a.y - b.y)
+  let floor = -Infinity
+  const nodes = wanted.map((w) => {
+    const y = Math.max(w.y - TERM_ROW / 2, floor)
+    floor = y + TERM_ROW
+    return {
+      id: w.id,
+      type: 'termNode',
+      position: { x: bandX, y },
+      data: { label: w.term.term_name, term: w.term, tables: w.tables },
+    }
+  })
   return { nodes, edges, omitted, tablesByTerm }
+}
+
+/** Part of a qualified table name before the last dot ('' when unqualified). */
+export function schemaOf(name) {
+  const i = name.lastIndexOf('.')
+  return i < 0 ? '' : name.slice(0, i)
+}
+
+/** Part after the last dot. */
+export function shortName(name) {
+  return name.slice(name.lastIndexOf('.') + 1)
+}
+
+/**
+ * Search tables and columns. Returns [{ table, column? }]: tables whose
+ * qualified or short name contains the query, then matching columns
+ * (case-insensitive). Capped at `limit`.
+ */
+export function searchSchema(query, tables, limit = 12) {
+  const q = (query || '').trim().toLowerCase()
+  if (!q) return []
+  const out = []
+  for (const t of tables) {
+    if (t.name.toLowerCase().includes(q) || shortName(t.name).toLowerCase().includes(q)) out.push({ table: t.name })
+  }
+  for (const t of tables) {
+    for (const c of t.columns || []) {
+      if (c.name.toLowerCase().includes(q)) out.push({ table: t.name, column: c.name })
+    }
+  }
+  return out.slice(0, limit)
+}
+
+/** Every table matching the query (not capped), for dimming the rest. */
+export function matchingTables(query, tables) {
+  return new Set(searchSchema(query, tables, Infinity).map((r) => r.table))
+}
+
+/** Facet values of a table: its tags/domain when the API gives them, else its schema prefix. */
+export function facetsOf(table) {
+  const out = [...(table.tags || []), ...(table.domain ? [table.domain] : [])].map(String)
+  return out.length ? out : [schemaOf(table.name) || '(no schema)']
+}
+
+/** Distinct facet values with counts, sorted by name; [] when there is nothing to filter on. */
+export function facetOptions(tables) {
+  const counts = new Map()
+  tables.forEach((t) => facetsOf(t).forEach((f) => counts.set(f, (counts.get(f) || 0) + 1)))
+  if (counts.size < 2) return []
+  return [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([value, count]) => ({ value, count }))
+}
+
+/** Names of the tables joined to / from `name` by any relation (not including itself). */
+export function neighbours(name, relations) {
+  const out = new Set()
+  relations.forEach((r) => {
+    if (r.source === name) out.add(r.target)
+    else if (r.target === name) out.add(r.source)
+  })
+  return out
+}
+
+/**
+ * Names of tables to show. `facets` is a Set of selected facet values (empty = all);
+ * `onlyNeighboursOf` limits to that table and its neighbours.
+ */
+export function visibleTables(tables, relations, { facets = new Set(), onlyNeighboursOf = null } = {}) {
+  const near = onlyNeighboursOf ? neighbours(onlyNeighboursOf, relations) : null
+  if (near) near.add(onlyNeighboursOf)
+  return new Set(tables.filter((t) => (
+    (!facets.size || facetsOf(t).some((f) => facets.has(f))) && (!near || near.has(t.name))
+  )).map((t) => t.name))
 }
 
 /** Glossary terms (already resolved by termElements) that use *table*. */

@@ -16,7 +16,7 @@ export default function TableNode({ data }) {
       }}
     >
       <Handle type="target" position={Position.Left} />
-      <Handle id="term" type="target" position={Position.Top} style={{ opacity: 0 }} />
+      <Handle id="term" type="target" position={Position.Right} style={{ opacity: 0 }} />
 
       <div
         style={{

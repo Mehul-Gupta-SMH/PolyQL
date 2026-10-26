@@ -17,6 +17,7 @@ import RelationEdge from './RelationEdge.jsx'
 import { apiFetch } from '../utils/api.js'
 import {
   NODE_WIDTH, EDGE_COLORS, tableNodes, relationEdges, termElements, termsForTable, termInInstance,
+  searchSchema, matchingTables, facetOptions, visibleTables, tableHeight,
 } from '../utils/erdModel.js'
 
 const nodeTypes = { tableNode: TableNode, termNode: TermNode }
@@ -262,7 +263,7 @@ export default function SchemaERD() {
 }
 
 function SchemaERDInner() {
-  const { fitView } = useReactFlow()
+  const { fitView, setCenter } = useReactFlow()
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
   const [loading, setLoading] = useState(true)
@@ -275,6 +276,11 @@ function SchemaERDInner() {
   const [terms, setTerms] = useState(null)
   const [termsError, setTermsError] = useState('')
   const [omitted, setOmitted] = useState(0)
+  const [relations, setRelations] = useState([])
+  const [query, setQuery] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [facets, setFacets] = useState(() => new Set())
+  const [neighboursOnly, setNeighboursOnly] = useState(false)
   const termsRequested = useRef(false)
   const nodesRef = useRef([])
   nodesRef.current = nodes
@@ -314,6 +320,9 @@ function SchemaERDInner() {
         )
         setNodes(ln)
         setEdges(le)
+        setRelations(data.relations)
+        setFacets(new Set())
+        setQuery('')
         setSchemaVersion((v) => v + 1)
         setLoading(false)
       })
@@ -350,7 +359,7 @@ function SchemaERDInner() {
     setOmitted(skipped)
     setSelection((sel) => (sel?.kind === 'term' && !tn.some((n) => n.id === sel.id) ? null : sel))
     // Term nodes sit outside the original fit; bring them into view.
-    if (tn.length) setTimeout(() => fitView({ duration: 200 }), 50)
+    if (tn.length) setTimeout(() => fitView({ duration: 200, minZoom: 0.05 }), 150)
   }, [showTerms, terms, schemaVersion, instance, setNodes, setEdges, fitView])
 
   // Highlight the selected table / term (and the tables a selected term uses).
@@ -378,6 +387,67 @@ function SchemaERDInner() {
 
   const handleClose = useCallback(() => setSelection(null), [])
 
+  const tableList = useMemo(
+    () => nodes.filter((n) => n.type === 'tableNode').map((n) => ({ name: n.id, columns: n.data.columns, tags: n.data.tags, domain: n.data.domain })),
+    [nodes],
+  )
+  const results = useMemo(() => searchSchema(query, tableList), [query, tableList])
+  const matched = useMemo(() => (query.trim() ? matchingTables(query, tableList) : null), [query, tableList])
+  const options = useMemo(() => facetOptions(tableList), [tableList])
+  const selectedTable = selection?.kind === 'table' ? selection.id : null
+  const visible = useMemo(
+    () => visibleTables(tableList, relations, { facets, onlyNeighboursOf: neighboursOnly ? selectedTable : null }),
+    [tableList, relations, facets, neighboursOnly, selectedTable],
+  )
+
+  // Hidden tables take their edges (and orphaned terms) with them; non-matches dim during a search.
+  const shownNodes = useMemo(() => {
+    const termVisible = (n) => n.data.tables.some((t) => visible.has(t))
+    return nodes.map((n) => {
+      const hidden = n.type === 'tableNode' ? !visible.has(n.id) : !termVisible(n)
+      const dim = matched && n.type === 'tableNode' && !matched.has(n.id)
+      if (!!n.hidden === hidden && (n.style?.opacity === 0.25) === !!dim) return n
+      return { ...n, hidden, style: { ...n.style, opacity: dim ? 0.25 : 1 } }
+    })
+  }, [nodes, visible, matched])
+  const shownEdges = useMemo(() => {
+    const hiddenNodes = new Set(shownNodes.filter((n) => n.hidden).map((n) => n.id))
+    return edges.map((e) => {
+      const hidden = hiddenNodes.has(e.source) || hiddenNodes.has(e.target)
+      // Term links stay faint until their term or one of its tables is selected.
+      const emphasised = !!selection && (e.source === selection.id || e.target === selection.id)
+      const opacity = e.id.startsWith('term:') && !emphasised ? 0.4 : 1
+      return !!e.hidden === hidden && (e.style?.opacity ?? 1) === opacity ? e : { ...e, hidden, style: { ...e.style, opacity } }
+    })
+  }, [edges, shownNodes, selection])
+
+  // A filter change drops a selection that is no longer shown and re-frames what remains.
+  const firstFilter = useRef(true)
+  useEffect(() => {
+    if (firstFilter.current) { firstFilter.current = false; return }
+    setSelection((sel) => (sel?.kind === 'table' && !visible.has(sel.id) ? null : sel))
+    const keep = nodesRef.current.filter((n) => n.type === 'tableNode' && visible.has(n.id))
+    if (keep.length) setTimeout(() => fitView({ nodes: keep, duration: 250, maxZoom: 1, padding: 0.15, minZoom: 0.05 }), 80)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [facets, neighboursOnly])
+
+  const focusTable = useCallback((name) => {
+    const node = nodesRef.current.find((n) => n.id === name)
+    if (!node) return
+    setFacets(new Set())
+    setSelection({ kind: 'table', id: name })
+    setSearchOpen(false)
+    // Wait a beat so the view has resized for the side pane before centring.
+    setTimeout(() => setCenter(node.position.x + NODE_WIDTH / 2, node.position.y + tableHeight(node) / 2, { zoom: 1, duration: 300 }), 60)
+  }, [setCenter])
+
+  const toggleFacet = (value) => setFacets((cur) => {
+    const next = new Set(cur)
+    if (next.has(value)) next.delete(value)
+    else next.add(value)
+    return next
+  })
+
   const detail = useMemo(() => {
     if (!selection) return null
     if (selection.kind === 'join') {
@@ -396,7 +466,7 @@ function SchemaERDInner() {
   const instanceToolbar = (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 10,
-      padding: '6px 10px', background: '#f9fafb',
+      padding: '6px 10px', background: '#f9fafb', flexWrap: 'wrap',
       borderBottom: '1px solid #e5e7eb', flexShrink: 0,
     }}>
       <span style={{ fontSize: 12, fontWeight: 600, color: '#6b7280' }}>Instance</span>
@@ -414,6 +484,79 @@ function SchemaERDInner() {
       <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: '#374151', marginLeft: 10 }}>
         <input type="checkbox" checked={showTerms} onChange={(e) => { setTermsError(''); setShowTerms(e.target.checked) }} />
         Show business terms
+      </label>
+      <div style={{ position: 'relative', marginLeft: 10 }}>
+        <input
+          type="search"
+          role="searchbox"
+          aria-label="Search tables and columns"
+          placeholder="Search tables / columns…"
+          value={query}
+          onChange={(e) => { setQuery(e.target.value); setSearchOpen(true) }}
+          onFocus={() => setSearchOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') { setQuery(''); setSearchOpen(false) }
+            else if (e.key === 'Enter' && results.length) focusTable(results[0].table)
+          }}
+          style={{ padding: '4px 10px', fontSize: 13, border: '1px solid #d1d5db', borderRadius: 6, width: 220 }}
+        />
+        {searchOpen && query.trim() && (
+          <ul
+            role="listbox"
+            aria-label="Search results"
+            style={{
+              position: 'absolute', top: '100%', left: 0, zIndex: 20, margin: '2px 0 0', padding: 2, listStyle: 'none',
+              width: 300, maxHeight: 260, overflowY: 'auto', background: '#fff', border: '1px solid #d1d5db',
+              borderRadius: 6, boxShadow: '0 4px 12px rgba(0,0,0,0.12)', fontSize: 12,
+            }}
+          >
+            {results.length === 0 && <li style={{ padding: '6px 8px', color: '#9ca3af' }}>No matches</li>}
+            {results.map((r) => (
+              <li
+                key={`${r.table}.${r.column || ''}`}
+                role="option"
+                aria-selected="false"
+                onClick={() => focusTable(r.table)}
+                style={{ padding: '5px 8px', cursor: 'pointer', borderRadius: 4, display: 'flex', gap: 6 }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = '#f3f4f6' }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = '' }}
+              >
+                <span style={{ color: r.column ? '#6b7280' : '#111827', fontWeight: r.column ? 400 : 600 }}>
+                  {r.table}{r.column && <span style={{ color: '#111827' }}>.{r.column}</span>}
+                </span>
+                <span style={{ marginLeft: 'auto', color: '#9ca3af' }}>{r.column ? 'column' : 'table'}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {options.length > 0 && (
+        <div role="group" aria-label="Filter tables" style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+          {options.map((o) => {
+            const on = facets.has(o.value)
+            return (
+              <button
+                key={o.value}
+                type="button"
+                aria-pressed={on}
+                onClick={() => toggleFacet(o.value)}
+                style={{
+                  padding: '2px 8px', fontSize: 11, borderRadius: 10, cursor: 'pointer',
+                  border: `1px solid ${on ? '#2563eb' : '#d1d5db'}`, background: on ? '#dbeafe' : '#fff', color: on ? '#1e40af' : '#374151',
+                }}
+              >
+                {o.value} ({o.count})
+              </button>
+            )
+          })}
+        </div>
+      )}
+      <label
+        title={selectedTable ? '' : 'Select a table first'}
+        style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: selectedTable ? '#374151' : '#9ca3af' }}
+      >
+        <input type="checkbox" checked={neighboursOnly && !!selectedTable} disabled={!selectedTable} onChange={(e) => setNeighboursOnly(e.target.checked)} />
+        Neighbours only
       </label>
       {showTerms && terms === null && !termsError && <span style={{ fontSize: 12, color: '#6b7280' }}>Loading terms…</span>}
       {showTerms && omitted > 0 && (
@@ -474,8 +617,8 @@ function SchemaERDInner() {
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
       <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
         <ReactFlow
-          nodes={nodes}
-          edges={edges}
+          nodes={shownNodes}
+          edges={shownEdges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           nodeTypes={nodeTypes}
@@ -483,10 +626,11 @@ function SchemaERDInner() {
           onNodeClick={onNodeClick}
           onEdgeClick={onEdgeClick}
           fitView
+          minZoom={0.05}
         >
           <Background />
           <Controls />
-          <MiniMap />
+          {!detail && <MiniMap pannable zoomable />}
         </ReactFlow>
         <Legend showTerms={showTerms} />
       </div>

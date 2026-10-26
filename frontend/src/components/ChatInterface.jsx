@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import ChatMessage from './ChatMessage.jsx'
 import { PROVIDER_LABELS, PROVIDER_MODELS, formatProviderLabel, defaultModel } from '../constants/providerLabels.js'
 import { apiFetch } from '../utils/api.js'
+import { toJSON, toMarkdown, parseImport, addSession, exportFilename, MAX_IMPORT_BYTES } from '../utils/sessionExport.js'
 
 const QUERY_TYPE_LABELS = {
   sql: 'SQL',
@@ -14,6 +15,23 @@ const MAX_SESSIONS = 30
 
 let _msgId = 0
 function nextId() { return ++_msgId }
+// Loaded/imported messages carry old ids; keep new ids above them.
+function syncMsgId(msgs) {
+  for (const m of msgs ?? []) if (Number.isFinite(m.id) && m.id > _msgId) _msgId = m.id
+}
+
+function downloadText(filename, text, mime) {
+  try {
+    const url = URL.createObjectURL(new Blob([text], { type: mime }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch { /* download unsupported (e.g. test env) */ }
+}
 
 function formatTimestamp(ts) {
   const d = new Date(ts)
@@ -29,8 +47,14 @@ function formatTimestamp(ts) {
 // ---------------------------------------------------------------------------
 // Left pane — session list
 // ---------------------------------------------------------------------------
-function SessionPane({ sessions, currentId, onSelect, onNew, onDelete }) {
+const smallBtn = {
+  flex: 1, padding: '4px 6px', fontSize: 11, background: '#fff', color: '#374151',
+  border: '1px solid #d1d5db', borderRadius: 5, cursor: 'pointer',
+}
+
+function SessionPane({ sessions, currentId, onSelect, onNew, onDelete, onExport, onImport, importError, onDismissError }) {
   const [hoverId, setHoverId] = useState(null)
+  const fileRef = useRef(null)
 
   return (
     <div style={{
@@ -51,6 +75,29 @@ function SessionPane({ sessions, currentId, onSelect, onNew, onDelete }) {
         >
           + New Chat
         </button>
+        <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>
+          <button style={{ ...smallBtn, opacity: currentId ? 1 : 0.5 }} disabled={!currentId}
+            onClick={() => onExport('json')} title="Export this conversation as JSON">Export JSON</button>
+          <button style={{ ...smallBtn, opacity: currentId ? 1 : 0.5 }} disabled={!currentId}
+            onClick={() => onExport('md')} title="Export this conversation as Markdown">Export MD</button>
+        </div>
+        <button style={{ ...smallBtn, width: '100%', marginTop: 4 }}
+          onClick={() => fileRef.current?.click()} title="Import a conversation from a JSON export">Import…</button>
+        <input
+          ref={fileRef} type="file" accept=".json,application/json" aria-label="Import conversation file"
+          style={{ display: 'none' }}
+          onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) onImport(f) }}
+        />
+        {importError && (
+          <div role="alert" style={{
+            marginTop: 6, padding: '6px 8px', fontSize: 11, color: '#991b1b',
+            background: '#fee2e2', border: '1px solid #fca5a5', borderRadius: 5,
+          }}>
+            Import failed: {importError}
+            <button onClick={onDismissError} aria-label="Dismiss"
+              style={{ marginLeft: 6, background: 'none', border: 'none', cursor: 'pointer', color: '#991b1b' }}>×</button>
+          </div>
+        )}
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '2px 6px 8px' }}>
@@ -139,15 +186,28 @@ export default function ChatInterface({ providers }) {
   const [sessions, setSessions] = useState([])
   const [currentSessionId, setCurrentSessionId] = useState(null)
   const [instance, setInstance] = useState('default')
+  const [importError, setImportError] = useState('')
   const [instances, setInstances] = useState([{ instance_name: 'default', db_type: 'generic' }])
   const bottomRef       = useRef(null)
   const sessionIdRef    = useRef(null)
   const skipNextSaveRef = useRef(false)  // skip auto-save when loading a session
+  const abortRef        = useRef(null)   // AbortController of the in-flight request
+  const stoppedRef      = useRef(false)  // true when the abort came from the Stop button
 
   // Scroll to bottom on new messages
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, loading])
+
+  // Esc stops a running generation; leaving the page aborts it.
+  useEffect(() => {
+    if (!loading) return undefined
+    const onKey = (e) => { if (e.key === 'Escape') handleStop() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [loading])
+
+  useEffect(() => () => { abortRef.current?.abort() }, [])
 
   // Sync provider (and default model) when list first loads
   useEffect(() => {
@@ -223,6 +283,7 @@ export default function ChatInterface({ providers }) {
   }
 
   function handleSelectSession(session) {
+    syncMsgId(session.messages)
     skipNextSaveRef.current = true
     setMessages(session.messages)
     setProvider(session.provider)
@@ -230,6 +291,31 @@ export default function ChatInterface({ providers }) {
     setQueryType(session.queryType)
     setCurrentSessionId(session.id)
     sessionIdRef.current = session.id
+  }
+
+  function handleExport(kind) {
+    const id = sessionIdRef.current
+    if (!id) return
+    const saved = sessions.find((s) => s.id === id)
+    const session = { ...(saved ?? { id, title: 'Conversation', timestamp: Date.now(), provider, queryType }), messages, model }
+    const isJson = kind === 'json'
+    downloadText(
+      exportFilename(session, isJson ? 'json' : 'md'),
+      isJson ? toJSON(session) : toMarkdown(session),
+      isJson ? 'application/json' : 'text/markdown',
+    )
+  }
+
+  async function handleImport(file) {
+    setImportError('')
+    if (file.size > MAX_IMPORT_BYTES) { setImportError('The file is too large to import.'); return }
+    let text
+    try { text = await file.text() } catch { setImportError('Could not read the file.'); return }
+    const res = parseImport(text, sessions.map((s) => s.id))
+    if (!res.ok) { setImportError(res.error); return }
+    setSessions((prev) => addSession(prev, res.session, MAX_SESSIONS))
+    apiFetch('/api/sessions', { method: 'POST', body: JSON.stringify(res.session) }).catch(() => {})
+    handleSelectSession(res.session)
   }
 
   function handleDeleteSession(id) {
@@ -256,8 +342,17 @@ export default function ChatInterface({ providers }) {
   // Streaming call — uses /api/chat/stream SSE endpoint.
   // Tokens arrive incrementally and update the in-progress bubble; the final
   // "done" event replaces it with the validated, formatted response.
+  function handleStop() {
+    if (!abortRef.current) return
+    stoppedRef.current = true
+    abortRef.current.abort()
+  }
+
   async function _callApiStream(history, prov, qType, retryLabel, mdl, inst) {
     setLoading(true)
+    const controller = new AbortController()
+    abortRef.current = controller
+    stoppedRef.current = false
     // Insert a placeholder streaming bubble so the user sees tokens arriving.
     const streamId = nextId()
     setMessages((prev) => [
@@ -269,6 +364,7 @@ export default function ChatInterface({ providers }) {
       const token = localStorage.getItem('poly_ql_token') || ''
       const res = await fetch('/api/chat/stream', {
         method: 'POST',
+        signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -348,13 +444,23 @@ export default function ChatInterface({ providers }) {
           }
         }
       }
-    } catch {
-      setMessages((prev) => prev.map((m) =>
-        m.id === streamId
-          ? { ...m, type: 'error', content: 'Network error — is the backend running?', retryQuery: retryLabel }
-          : m
-      ))
+    } catch (err) {
+      if (stoppedRef.current || err?.name === 'AbortError') {
+        // User pressed Stop: keep whatever text arrived, no error bubble.
+        setMessages((prev) => prev.map((m) =>
+          m.id === streamId && m.type === 'streaming'
+            ? { ...m, type: 'stopped', retryQuery: retryLabel }
+            : m
+        ))
+      } else {
+        setMessages((prev) => prev.map((m) =>
+          m.id === streamId
+            ? { ...m, type: 'error', content: 'Network error — is the backend running?', retryQuery: retryLabel }
+            : m
+        ))
+      }
     } finally {
+      if (abortRef.current === controller) abortRef.current = null
       setLoading(false)
     }
   }
@@ -422,6 +528,10 @@ export default function ChatInterface({ providers }) {
         onSelect={handleSelectSession}
         onNew={handleNewChat}
         onDelete={handleDeleteSession}
+        onExport={handleExport}
+        onImport={handleImport}
+        importError={importError}
+        onDismissError={() => setImportError('')}
       />
 
       {/* ── Right: chat area ── */}
@@ -588,6 +698,19 @@ export default function ChatInterface({ providers }) {
             onKeyDown={handleKeyDown}
             disabled={loading}
           />
+          {loading ? (
+            <button
+              onClick={handleStop}
+              title="Stop generating (Esc)"
+              style={{
+                padding: '10px 18px', background: '#dc2626', color: '#fff',
+                border: 'none', borderRadius: 10, fontWeight: 700, fontSize: 14,
+                cursor: 'pointer', flexShrink: 0, alignSelf: 'flex-end', height: 44,
+              }}
+            >
+              Stop
+            </button>
+          ) : (
           <button
             onClick={handleSend}
             disabled={loading || !input.trim()}
@@ -602,6 +725,7 @@ export default function ChatInterface({ providers }) {
           >
             Send
           </button>
+          )}
         </div>
       </div>
     </div>

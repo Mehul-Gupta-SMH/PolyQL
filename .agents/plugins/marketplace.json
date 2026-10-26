@@ -1,0 +1,11 @@
+{
+  "name": "polyql",
+  "plugins": [
+    {
+      "name": "polyql",
+      "source": { "source": "local", "path": "./plugins/polyql" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Developer Tools"
+    }
+  ]
+}

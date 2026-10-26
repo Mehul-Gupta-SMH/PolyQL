@@ -7,9 +7,9 @@ on:
     branches: [ master ]
 
 jobs:
-  test:
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -24,18 +24,38 @@ jobs:
         run: pip install -r requirements-ci.txt
 
       - name: Lint (ruff)
-        run: python -m ruff check backend/ tests/ validation/
+        run: python -m ruff check backend/ tests/ validation/ scripts/
+
+      - name: Check requirements-ci.txt matches pyproject.toml
+        run: python scripts/check_ci_requirements.py
+
+  backend-tests:
+    name: Backend tests
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'requirements-ci.txt'
+
+      - name: Install dependencies
+        run: pip install -r requirements-ci.txt
 
       - name: Run tests
         run: python -m pytest tests/ -v
 
-  frontend:
+  frontend-tests:
+    name: Frontend tests
+    needs: lint
     runs-on: ubuntu-latest
-
     defaults:
       run:
         working-directory: frontend
-
     steps:
       - uses: actions/checkout@v4
 
@@ -54,3 +74,45 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # Non-blocking: surfaces known CVEs without failing the PR.
+  security-audit:
+    name: Security audit (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'requirements-ci.txt'
+
+      - name: pip-audit
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          echo "## pip-audit (requirements-ci.txt)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          pip-audit -r requirements-ci.txt 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          status=${PIPESTATUS[0]}
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: npm audit
+        continue-on-error: true
+        working-directory: frontend
+        run: |
+          echo "## npm audit (frontend, high+)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          npm audit --audit-level=high 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          status=${PIPESTATUS[0]}
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

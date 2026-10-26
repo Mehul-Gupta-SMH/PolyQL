@@ -1,5 +1,6 @@
 import {
   resolveTermTables, termInInstance, termElements, termsForTable, relationEdges, edgeLabel, EDGE_COLORS,
+  searchSchema, matchingTables, facetsOf, facetOptions, neighbours, visibleTables, schemaOf, NODE_WIDTH, TERM_ROW,
 } from '../erdModel.js'
 
 const TABLES = ['sales.public.orders', 'customers', 'Dim_Date']
@@ -34,14 +35,28 @@ describe('termElements', () => {
     { term_id: 'b', term_name: 'B', table_deps: ['customers'] },
     { term_id: 'c', term_name: 'C', table_deps: ['missing'] },
   ]
-  it('places term nodes above their first table, one dotted edge per table', () => {
+  it('puts term nodes in a column right of every table, one dotted straight edge per table', () => {
     const out = termElements(terms, nodes)
     expect(out.nodes.map((n) => n.id)).toEqual(['term:a', 'term:b'])
-    expect(out.nodes[0].position.x).toBe(300)
-    expect(out.nodes[1].position.y).toBeLessThan(out.nodes[0].position.y) // stacked
+    const right = Math.max(...nodes.map((n) => n.position.x)) + NODE_WIDTH
+    out.nodes.forEach((n) => expect(n.position.x).toBeGreaterThan(right))
     expect(out.edges.map((e) => e.target)).toEqual(['customers', 'sales.public.orders', 'customers'])
+    expect(out.edges[0].type).toBe('straight')
     expect(out.edges[0].style.strokeDasharray).toBeTruthy()
     expect(out.omitted).toBe(1)
+  })
+  it('stacks terms without overlap even when they want the same row', () => {
+    const many = Array.from({ length: 6 }, (_, i) => ({ term_id: `m${i}`, term_name: `M${i}`, table_deps: ['customers'] }))
+    const ys = termElements(many, nodes).nodes.map((n) => n.position.y).sort((a, b) => a - b)
+    for (let i = 1; i < ys.length; i++) expect(ys[i] - ys[i - 1]).toBeGreaterThanOrEqual(TERM_ROW)
+  })
+  it('centres a two-table term between its tables', () => {
+    const two = [
+      { id: 'a', position: { x: 0, y: 0 }, data: { columns: [] } },
+      { id: 'b', position: { x: 0, y: 500 }, data: { columns: [] } },
+    ]
+    const [n] = termElements([{ term_id: 'x', term_name: 'X', table_deps: ['a', 'b'] }], two).nodes
+    expect(n.position.y + TERM_ROW / 2).toBe((30 + 530) / 2)
   })
   it('finds the terms for a table', () => {
     const out = termElements(terms, nodes)
@@ -70,5 +85,43 @@ describe('relationEdges', () => {
     const [e] = relationEdges([{ source: 'a', target: 'b', joinKeys: 'a.x = b.id' }])
     expect(e.data.alternatives).toEqual(['a.x = b.id'])
     expect(e.data.kind).toBe('fk')
+  })
+})
+
+describe('search, facets and visibility', () => {
+  const tables = [
+    { name: 'sales.public.orders', columns: [{ name: 'id' }, { name: 'customer_id' }] },
+    { name: 'sales.public.customers', columns: [{ name: 'id' }] },
+    { name: 'hr.employees', columns: [{ name: 'Order_ref' }] },
+  ]
+  const relations = [{ source: 'sales.public.orders', target: 'sales.public.customers' }]
+
+  it('matches qualified or short table names and columns, case-insensitively', () => {
+    expect(searchSchema('ORDERS', tables)).toEqual([{ table: 'sales.public.orders' }])
+    expect(searchSchema('public.cust', tables)).toEqual([{ table: 'sales.public.customers' }])
+    expect(searchSchema('order', tables)).toEqual([
+      { table: 'sales.public.orders' }, { table: 'hr.employees', column: 'Order_ref' },
+    ])
+    expect(searchSchema('customer_id', tables)).toEqual([{ table: 'sales.public.orders', column: 'customer_id' }])
+    expect(searchSchema('  ', tables)).toEqual([])
+  })
+  it('caps results but not the dimming set', () => {
+    expect(searchSchema('id', tables, 2)).toHaveLength(2)
+    expect([...matchingTables('id', tables)]).toEqual(['sales.public.orders', 'sales.public.customers'])
+  })
+  it('facets by tags/domain when present, else schema prefix', () => {
+    expect(facetsOf({ name: 'a.b.c' })).toEqual(['a.b'])
+    expect(facetsOf({ name: 'c' })).toEqual(['(no schema)'])
+    expect(facetsOf({ name: 'c', tags: ['x'], domain: 'finance' })).toEqual(['x', 'finance'])
+    expect(schemaOf('a.b.c')).toBe('a.b')
+    expect(facetOptions(tables)).toEqual([{ value: 'hr', count: 1 }, { value: 'sales.public', count: 2 }])
+    expect(facetOptions([tables[0], tables[1]])).toEqual([]) // single facet: nothing to filter
+  })
+  it('filters by facet and by neighbours', () => {
+    expect(neighbours('sales.public.orders', relations)).toEqual(new Set(['sales.public.customers']))
+    expect(visibleTables(tables, relations).size).toBe(3)
+    expect([...visibleTables(tables, relations, { facets: new Set(['hr']) })]).toEqual(['hr.employees'])
+    expect([...visibleTables(tables, relations, { onlyNeighboursOf: 'sales.public.customers' })])
+      .toEqual(['sales.public.orders', 'sales.public.customers'])
   })
 })

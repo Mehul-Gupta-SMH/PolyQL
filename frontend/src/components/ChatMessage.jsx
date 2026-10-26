@@ -274,6 +274,43 @@ export default function ChatMessage({ msg, onRetry, onOptionSelect, onOutcome })
     )
   }
 
+  // ---- Stopped bubble (user pressed Stop; partial text kept) --------------
+  if (msg.type === 'stopped') {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 14 }}>
+        <div style={{ maxWidth: '80%', minWidth: 280 }}>
+          <div style={{ fontSize: 11, color: '#92400e', marginBottom: 4, marginLeft: 2, fontWeight: 600 }}>
+            Stopped
+          </div>
+          {msg.content && (
+            <div style={{ background: '#1e1e2e', borderRadius: '4px 12px 12px 12px', overflow: 'hidden', opacity: 0.85 }}>
+              <pre style={{
+                margin: 0, padding: '14px 16px', color: '#cdd6f4', fontSize: 13, lineHeight: 1.6,
+                overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+              }}>
+                {msg.content}
+              </pre>
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: '#6b7280', marginTop: 6, marginLeft: 2 }}>
+            Generation stopped — partial output, not runnable.
+            {onRetry && msg.retryQuery && (
+              <button
+                onClick={() => onRetry(msg)}
+                style={{
+                  marginLeft: 8, background: 'none', border: '1px solid #d1d5db',
+                  borderRadius: 5, padding: '2px 10px', fontSize: 12, color: '#374151', cursor: 'pointer',
+                }}
+              >
+                ↺ Retry
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   // ---- Error bubble --------------------------------------------------------
   if (msg.type === 'error') {
     return (
